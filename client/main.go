@@ -13,7 +13,7 @@ func main() {
 	var connections int
 	var serverHost string
 	flag.IntVar(&connections, "connections", 50000, "Number of WebSocket connections")
-	flag.StringVar(&serverHost, "host", "host.docker.internal", "WebSocket server host")
+	flag.StringVar(&serverHost, "host", "localhost", "WebSocket server host")
 	flag.Parse()
 
 	var conns []*websocket.Conn
