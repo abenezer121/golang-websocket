@@ -75,10 +75,10 @@ func (e *epoll) delete(conn net.Conn) error {
 }
 
 func (e *epoll) wait() ([]net.Conn, error) {
-	events := make([]unix.EpollEvent, 32768)
+	events := make([]unix.EpollEvent, 100)
 
 	for {
-		n, err := unix.EpollWait(e.fd, events, -1)
+		n, err := unix.EpollWait(e.fd, events, 100)
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
 
@@ -153,14 +153,14 @@ func processMessages(ep *epoll, ctx context.Context) {
 					break
 				}
 
-				msg, _, err := wsutil.ReadClientData(conn)
+				_, _, err := wsutil.ReadClientData(conn)
 				if err != nil {
 					if err := ep.delete(conn); err != nil {
 						log.Printf("Failed to remove connection: %v", err)
 					}
 					conn.Close()
 				} else {
-					fmt.Println(string(msg))
+					// fmt.Println(string(msg))
 				}
 			}
 		}
