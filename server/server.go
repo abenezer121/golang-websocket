@@ -399,10 +399,12 @@ func workerFunc(id int, ep *epoll, jobChan <-chan eventJob, wg *sync.WaitGroup, 
 }
 
 func (ep *epoll) startConnectionHealthCheck(ctx context.Context) {
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
+		fmt.Println("checcking connection")
 		select {
 		case <-ctx.Done():
 			return
