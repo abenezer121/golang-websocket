@@ -398,6 +398,30 @@ func workerFunc(id int, ep *epoll, jobChan <-chan eventJob, wg *sync.WaitGroup, 
 	}
 }
 
+func (ep *epoll) startConnectionHealthCheck(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ep.connections.Range(func(key, value interface{}) bool {
+
+				conn := value.(net.Conn)
+
+				// Try to write a ping frame
+				err := wsutil.WriteClientMessage(conn, ws.OpPing, nil)
+				if err != nil {
+					ep.deleteAndClose(conn)
+				}
+				return true
+			})
+		}
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -434,6 +458,10 @@ func main() {
 		fmt.Println("Failed to initialize epoll", "error", err)
 		os.Exit(1)
 	}
+
+	connectionCheckerCtx, cancelConnectionChecker := context.WithCancel(context.Background())
+	go epoll.startConnectionHealthCheck(connectionCheckerCtx)
+
 	// Create eventQueue
 	eventQueue := &eventQueue{}
 	// Close the epoll file descriptor on shutdown
@@ -474,6 +502,7 @@ func main() {
 	}
 	fmt.Println("signalling epoll loop and workers to shut down ...")
 	cancelEpollLoop()
+	cancelConnectionChecker()
 
 	// close worker channel
 	close(jobChan)
@@ -496,27 +525,3 @@ func main() {
 }
 
 // // // sudo sh -c "echo 2621440 > /proc/sys/net/netfilter/nf_conntrack_max"
-
-// // // func (ep *epoll) startConnectionHealthCheck(ctx context.Context) {
-// // // 	ticker := time.NewTicker(30 * time.Second)
-// // // 	defer ticker.Stop()
-
-// // // 	for {
-// // // 		select {
-// // // 		case <-ctx.Done():
-// // // 			return
-// // // 		case <-ticker.C:
-// // // 			ep.connections.Range(func(key, value interface{}) bool {
-// // // 				fd := key.(int)
-// // // 				conn := value.(net.Conn)
-
-// // // 				// Try to write a ping frame
-// // // 				err := wsutil.WriteClientMessage(conn, ws.OpPing, nil)
-// // // 				if err != nil {
-// // // 					ep.deleteAndClose(conn)
-// // // 				}
-// // // 				return true
-// // // 			})
-// // // 		}
-// // // 	}
-// // // }

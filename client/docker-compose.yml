@@ -4,5 +4,5 @@ services:
     deploy:
       replicas: 100
     network_mode: "bridge"
-    command: ["/app/client", "-conn=10", "-ip=9.141.20.46"]
+    command: ["/app/client", "-conn=100", "-ip=9.141.20.46"]
 
