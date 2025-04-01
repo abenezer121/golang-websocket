@@ -80,7 +80,7 @@ func newEpoll(workerChan chan<- eventJob, shutdownCtx context.Context) (*epoll, 
 }
 
 func (e *epoll) add(conn net.Conn) error {
-	fmt.Println("Trying to add to epoll")
+
 	// Get file descriptor
 	fd, err := getFd(conn)
 	if err != nil {
@@ -190,18 +190,18 @@ func (e *epoll) wait() {
 			select {
 			case e.workerChan <- job:
 			case <-e.shutdownCtx.Done():
-				log.Println("Shutdown while dispatching epoll event.")
+				// log.Println("Shutdown while dispatching epoll event.")
 				return
 			default:
 				eventQueue.enqueue(job)
-				log.Printf("WARNING: Worker channel full. Queuing event for FD %d (Events: 0x%x).", job.fd, job.events)
+				// log.Printf("WARNING: Worker channel full. Queuing event for FD %d (Events: 0x%x).", job.fd, job.events)
 			}
 		}
 	}
 }
 
 func wsHander(w http.ResponseWriter, r *http.Request, ep *epoll) {
-	fmt.Println("WsHandler called")
+
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
 		if errors.Is(err, syscall.EMFILE) { // "Too many open files"
@@ -391,7 +391,8 @@ func workerFunc(id int, ep *epoll, jobChan <-chan eventJob, wg *sync.WaitGroup, 
 			if job, ok := eventQueue.dequeue(); ok {
 				ep.handleEvents(job.fd, job.events)
 			} else {
-				time.Sleep(1 * time.Millisecond) // Small sleep to prevent busy-waiting
+				// Small sleep to prevent busy-waiting
+				time.Sleep(1 * time.Millisecond)
 			}
 		}
 	}
