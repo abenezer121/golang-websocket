@@ -3,24 +3,33 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/url"
+	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+var (
+	ip          = flag.String("ip", "127.0.0.1", "server IP")
+	connections = flag.Int("conn", 50000, "number of websocket connections")
+)
+
 func main() {
-	var connections int
-	var serverHost string
-	flag.IntVar(&connections, "connections", 50000, "Number of WebSocket connections")
-	flag.StringVar(&serverHost, "host", "localhost", "WebSocket server host")
+	flag.Usage = func() {
+		io.WriteString(os.Stderr, `Websockets client generator Example usage: ./client -ip=172.17.0.1 -conn=10
+`)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
+	u := url.URL{Scheme: "ws", Host: *ip + ":8080", Path: "/ws"}
+	log.Printf("Connecting to %s", u.String())
 	var conns []*websocket.Conn
-	wsURL := fmt.Sprintf("ws://%s:8080/ping-location", serverHost)
-	fmt.Println(connections)
-	for i := 0; i < connections; i++ {
-		c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	for i := 0; i < *connections; i++ {
+		c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 		if err != nil {
 			fmt.Println("Failed to connect", i, err)
 			break
@@ -34,10 +43,13 @@ func main() {
 	}
 
 	log.Printf("Finished initializing %d connections", len(conns))
-
+	tts := time.Second
+	if *connections > 100 {
+		tts = time.Millisecond * 5
+	}
 	for {
 		for i := 0; i < len(conns); i++ {
-			time.Sleep(time.Millisecond * 5)
+			time.Sleep(tts)
 			conn := conns[i]
 			log.Printf("Conn %d sending message", i)
 			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second*5)); err != nil {
