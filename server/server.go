@@ -44,6 +44,28 @@ type eventJob struct {
 	events uint32
 }
 
+type eventQueue struct {
+	mu    sync.Mutex
+	queue []eventJob
+}
+
+func (eq *eventQueue) enqueue(job eventJob) {
+	eq.mu.Lock()
+	defer eq.mu.Unlock()
+	eq.queue = append(eq.queue, job)
+}
+
+func (eq *eventQueue) dequeue() (eventJob, bool) {
+	eq.mu.Lock()
+	defer eq.mu.Unlock()
+	if len(eq.queue) == 0 {
+		return eventJob{}, false
+	}
+	job := eq.queue[0]
+	eq.queue = eq.queue[1:]
+	return job, true
+}
+
 func newEpoll(workerChan chan<- eventJob, shutdownCtx context.Context) (*epoll, error) {
 	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
@@ -137,10 +159,9 @@ func getFd(conn net.Conn) (int, error) {
 	return fd, nil
 }
 
-// ([]net.Conn, error)
 func (e *epoll) wait() {
 	events := make([]unix.EpollEvent, 128)
-
+	eventQueue := &eventQueue{}
 	for {
 		select {
 		case <-e.shutdownCtx.Done():
@@ -148,9 +169,7 @@ func (e *epoll) wait() {
 			return
 		default:
 		}
-
-		n, err := unix.EpollWait(e.fd, events, -1) // Using -1 for timeout instead of 100
-
+		n, err := unix.EpollWait(e.fd, events, -1)
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
 				continue
@@ -162,31 +181,25 @@ func (e *epoll) wait() {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-
 		for i := 0; i < n; i++ {
-
 			ev := &events[i]
 			job := eventJob{
 				fd:     int(ev.Fd),
 				events: ev.Events,
 			}
-
-			// Non-blocking send to worker channel
 			select {
 			case e.workerChan <- job:
-				// Successfully dispatched job
 			case <-e.shutdownCtx.Done():
-				// Shutdown occurred while dispatching
 				log.Println("Shutdown while dispatching epoll event.")
 				return
 			default:
-				// This should ideally not happen if workers keep up and channel is buffered.
-				// If it does, it might indicate workers are overwhelmed or stuck.
-				// log.Printf("WARNING: Worker channel full. Discarding event for FD %d (Events: 0x%x). Check worker performance.", job.fd, job.events)
+				eventQueue.enqueue(job)
+				log.Printf("WARNING: Worker channel full. Queuing event for FD %d (Events: 0x%x).", job.fd, job.events)
 			}
 		}
 	}
 }
+
 func wsHander(w http.ResponseWriter, r *http.Request, ep *epoll) {
 	fmt.Println("WsHandler called")
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
@@ -210,11 +223,11 @@ func wsHander(w http.ResponseWriter, r *http.Request, ep *epoll) {
 	}
 }
 
-func startWorkers(n int, ep *epoll, jobChan <-chan eventJob, wg *sync.WaitGroup) {
+func startWorkers(n int, ep *epoll, jobChan <-chan eventJob, wg *sync.WaitGroup, eventQueue *eventQueue) {
 	fmt.Println("Starting worker pool ", " count ", n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		go workerFunc(i, ep, jobChan, wg)
+		go workerFunc(i, ep, jobChan, wg, eventQueue)
 	}
 }
 
@@ -365,41 +378,23 @@ func (ep *epoll) processMessage(conn net.Conn, fd int, msg []byte, op ws.OpCode)
 	return nil
 }
 
-// func (ep *epoll) handleRead(conn net.Conn) {
-// 	_, _, err := wsutil.ReadClientData(conn)
-
-// 	if err != nil {
-// 		fd, fdErr := getFd(conn)
-// 		if fdErr != nil {
-// 			return
-// 		}
-
-// 		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) {
-
-// 			fmt.Println("Client FD %d closed connection during read: %v", fd, err)
-// 		} else if opErr, ok := err.(*net.OpError); ok && (errors.Is(opErr.Err, syscall.ECONNRESET) || errors.Is(opErr.Err, syscall.ETIMEDOUT)) {
-
-// 			fmt.Println("Client FD %d network error during read: %v", fd, err)
-// 		} else {
-
-// 			fmt.Println("Error reading from client FD %d: %v", fd, err)
-// 		}
-
-// 		ep.deleteAndClose(conn)
-// 		return
-// 	}
-
-// 	// fmt.Println("Msg: ", msg)
-// }
-
-func workerFunc(id int, ep *epoll, jobChan <-chan eventJob, wg *sync.WaitGroup) {
+func workerFunc(id int, ep *epoll, jobChan <-chan eventJob, wg *sync.WaitGroup, eventQueue *eventQueue) {
 	defer wg.Done()
-	fmt.Println("worker ", id, " started ")
-	for job := range jobChan {
-		ep.handleEvents(job.fd, job.events)
-
+	for {
+		select {
+		case job, ok := <-jobChan:
+			if !ok {
+				return
+			}
+			ep.handleEvents(job.fd, job.events)
+		default:
+			if job, ok := eventQueue.dequeue(); ok {
+				ep.handleEvents(job.fd, job.events)
+			} else {
+				time.Sleep(1 * time.Millisecond) // Small sleep to prevent busy-waiting
+			}
+		}
 	}
-	fmt.Println("Worker stopped")
 }
 
 func main() {
@@ -438,7 +433,8 @@ func main() {
 		fmt.Println("Failed to initialize epoll", "error", err)
 		os.Exit(1)
 	}
-
+	// Create eventQueue
+	eventQueue := &eventQueue{}
 	// Close the epoll file descriptor on shutdown
 	defer func() {
 		log.Printf("Closing epoll FD: %d", epoll.fd)
@@ -449,7 +445,7 @@ func main() {
 
 	// start worker goroutines
 	workerWg := &sync.WaitGroup{}
-	startWorkers(*workers, epoll, jobChan, workerWg)
+	startWorkers(*workers, epoll, jobChan, workerWg, eventQueue)
 	go epoll.wait()
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -484,6 +480,17 @@ func main() {
 	fmt.Println("Waiting for workers to finish...")
 	workerWg.Wait()
 	fmt.Println("All workers finished.")
+	closedCount := 0
+	epoll.connections.Range(func(key, value interface{}) bool {
+		fd := key.(int)
+		conn := value.(net.Conn)
+		log.Printf("Closing connection FD %d from final cleanup.", fd)
+		conn.Close() // Ignore error here
+		closedCount++
+		return true // Continue iteration
+	})
+	log.Printf("Closed %d connections during final cleanup.", closedCount)
+	log.Printf("Server gracefully shut down.")
 
 }
 
