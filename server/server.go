@@ -182,7 +182,7 @@ func (e *epoll) wait() {
 			default:
 				// This should ideally not happen if workers keep up and channel is buffered.
 				// If it does, it might indicate workers are overwhelmed or stuck.
-				log.Printf("WARNING: Worker channel full. Discarding event for FD %d (Events: 0x%x). Check worker performance.", job.fd, job.events)
+				// log.Printf("WARNING: Worker channel full. Discarding event for FD %d (Events: 0x%x). Check worker performance.", job.fd, job.events)
 			}
 		}
 	}
@@ -447,6 +447,7 @@ func main() {
 		}
 	}()
 
+	// start worker goroutines
 	workerWg := &sync.WaitGroup{}
 	startWorkers(*workers, epoll, jobChan, workerWg)
 	go epoll.wait()
