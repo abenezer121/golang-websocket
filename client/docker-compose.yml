@@ -2,7 +2,7 @@ services:
   ws-client:
     image: ws-client
     deploy:
-      replicas: 2
+      replicas: 100
     network_mode: "bridge"
-    command: ["/app/client", "-conn=50000", "-ip=172.17.0.1"]
+    command: ["/app/client", "-conn=10", "-ip=9.141.20.46"]
 

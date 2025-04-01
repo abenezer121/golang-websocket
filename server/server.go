@@ -351,7 +351,7 @@ func (ep *epoll) processMessage(conn net.Conn, fd int, msg []byte, op ws.OpCode)
 	// Simple echo server example:
 	switch op {
 	case ws.OpText, ws.OpBinary:
-		log.Printf("Received message on FD %d: %s", fd, string(msg))
+		// log.Printf("Received message on FD %d: %s", fd, string(msg))
 
 		// Echo the message back
 		if err := wsutil.WriteServerMessage(conn, op, msg); err != nil {
