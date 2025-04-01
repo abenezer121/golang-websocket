@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -48,6 +49,7 @@ func newEpoll(workerChan chan<- eventJob, shutdownCtx context.Context) (*epoll, 
 	if err != nil {
 		return nil, fmt.Errorf("Canot create epoll in the kernel")
 	}
+	log.Printf("created epoll instance with fd : %d", fd)
 	return &epoll{
 		fd:          fd,
 		shutdownCtx: shutdownCtx,
@@ -56,23 +58,30 @@ func newEpoll(workerChan chan<- eventJob, shutdownCtx context.Context) (*epoll, 
 }
 
 func (e *epoll) add(conn net.Conn) error {
+	fmt.Println("Trying to add to epoll")
 	// Get file descriptor
 	fd, err := getFd(conn)
 	if err != nil {
+		fmt.Println("Unable to get fd in add")
 		return fmt.Errorf("failed to get file descriptor: %w", err)
 	}
 
-	// Set non-blocking mode
-	if err := unix.SetNonblock(fd, true); err != nil {
-		return fmt.Errorf("failed to set non-blocking: %w", err)
-	}
+	// Add connection FD to epoll with edge-triggered monitoring for read, write readiness, and peer close.
+	// EPOLLET (Edge Triggered): Notify only on changes. Requires careful reading/writing all available data.
+	// EPOLLIN: Monitor for read readiness.
+	// EPOLLOUT: Monitor for write readiness (useful for handling backpressure, currently write handling is basic).
+	// EPOLLRDHUP: Monitor for peer closing connection or half-closing write side. Robust way to detect closure.
+	// EPOLLERR: Monitor for errors (implicitly monitored, but good to include).
+	// EPOLLHUP: Monitor for hangup (implicitly monitored).
 
 	// Add to epoll with edge-triggered mode
 	err = unix.EpollCtl(e.fd, unix.EPOLL_CTL_ADD, fd, &unix.EpollEvent{
-		Events: unix.EPOLLIN | unix.EPOLLOUT | unix.EPOLLRDHUP | unix.EPOLLET,
+		Events: unix.EPOLLIN | unix.EPOLLOUT | unix.EPOLLRDHUP | unix.EPOLLET | unix.EPOLLERR | unix.EPOLLHUP,
 		Fd:     int32(fd),
 	})
 	if err != nil {
+		conn.Close() // close the
+		fmt.Println("failed to add to epoll ", err)
 		return fmt.Errorf("failed to add to epoll: %w", err)
 	}
 
@@ -86,12 +95,16 @@ func (e *epoll) add(conn net.Conn) error {
 func (e *epoll) delete(fd int) error {
 	err := unix.EpollCtl(e.fd, syscall.EPOLL_CTL_DEL, fd, nil)
 	if err != nil && !errors.Is(err, unix.ENOENT) {
+		// ENOENT means it was already removed or never added
 		return fmt.Errorf("epoll ctl del error: %w", err)
 	}
+	_, loaded := e.connections.LoadAndDelete(fd)
+	if loaded {
 
-	e.connections.LoadAndDelete(fd)
-	newCount := e.totalSocket.Add(-1)
-	fmt.Println("Client deleted", "remaining_connections", newCount)
+		newCount := e.totalSocket.Add(-1)
+		log.Printf("FD %d removed from connection map. Remaining connections: %d", fd, newCount)
+	} else {
+	}
 
 	return nil
 
@@ -117,12 +130,16 @@ func getFd(conn net.Conn) (int, error) {
 	if opErr != nil {
 		return -1, fmt.Errorf("operation error during control: %w", opErr)
 	}
+
+	if fd <= 0 {
+		return -1, errors.New("invalid file descriptor obtained")
+	}
 	return fd, nil
 }
 
 // ([]net.Conn, error)
 func (e *epoll) wait() {
-	events := make([]unix.EpollEvent, 100)
+	events := make([]unix.EpollEvent, 128)
 
 	for {
 		select {
@@ -132,7 +149,7 @@ func (e *epoll) wait() {
 		default:
 		}
 
-		n, err := unix.EpollWait(e.fd, events, 100) // Using -1 for timeout instead of 100
+		n, err := unix.EpollWait(e.fd, events, -1) // Using -1 for timeout instead of 100
 
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
@@ -147,37 +164,43 @@ func (e *epoll) wait() {
 		}
 
 		for i := 0; i < n; i++ {
-			fd := int(events[i].Fd)
-			event := events[i].Events
 
-			// Handle errors/disconnection
-			if event&(unix.EPOLLERR|unix.EPOLLHUP|unix.EPOLLRDHUP) != 0 {
-				e.delete(fd)
-				continue
-			}
-
+			ev := &events[i]
 			job := eventJob{
-				fd:     fd,
-				events: event,
+				fd:     int(ev.Fd),
+				events: ev.Events,
 			}
 
+			// Non-blocking send to worker channel
 			select {
 			case e.workerChan <- job:
-				// fmt.Printf("Dispatched job to worker fd=%d events=0x%x\n", job.fd, job.events)
+				// Successfully dispatched job
 			case <-e.shutdownCtx.Done():
+				// Shutdown occurred while dispatching
+				log.Println("Shutdown while dispatching epoll event.")
 				return
+			default:
+				// This should ideally not happen if workers keep up and channel is buffered.
+				// If it does, it might indicate workers are overwhelmed or stuck.
+				log.Printf("WARNING: Worker channel full. Discarding event for FD %d (Events: 0x%x). Check worker performance.", job.fd, job.events)
 			}
 		}
 	}
 }
 func wsHander(w http.ResponseWriter, r *http.Request, ep *epoll) {
+	fmt.Println("WsHandler called")
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
-		if errors.Is(err, syscall.EMFILE) {
+		if errors.Is(err, syscall.EMFILE) { // "Too many open files"
 			http.Error(w, "Server at connection limit", http.StatusServiceUnavailable)
+			// Log this specific error clearly!
+			log.Printf("ws.UpgradeHTTP failed: %v (EMFILE)", err)
 			return
 		}
-		fmt.Printf("Upgrade error: %v\n", err)
+		// Log other upgrade errors too
+		log.Printf("ws.UpgradeHTTP failed: %v", err)
+		fmt.Printf("Upgrade error: %v\n", err) // You have this already
+		os.Exit(1)
 		return
 	}
 	if err := ep.add(conn); err != nil {
@@ -228,9 +251,19 @@ func (ep *epoll) handleEvents(fd int, events uint32) {
 		ep.deleteAndClose(wsConn)
 		return
 	}
-	if events&unix.EPOLLERR != 0 || events&unix.EPOLLHUP != 0 || events&unix.EPOLLRDHUP != 0 {
-		fmt.Println("Epoll error/hangup event received", "events", fmt.Sprintf("0x%x", events))
-		ep.deleteAndClose(conn.(net.Conn))
+
+	// Check for errors or hangup events first.
+	// EPOLLRDHUP indicates the peer has closed their writing end or the whole connection.
+	// EPOLLHUP often indicates an unexpected close or reset.
+	// EPOLLERR indicates an error on the FD.
+	if events&(unix.EPOLLERR|unix.EPOLLHUP|unix.EPOLLRDHUP) != 0 {
+
+		ep.deleteAndClose(wsConn)
+		return
+	}
+
+	if events&(unix.EPOLLERR|unix.EPOLLHUP|unix.EPOLLRDHUP) != 0 {
+		ep.deleteAndClose(wsConn)
 		return
 	}
 
@@ -244,7 +277,7 @@ func (ep *epoll) handleEvents(fd int, events uint32) {
 
 	if events&unix.EPOLLIN != 0 {
 		// handle read
-		ep.handleRead(conn.(net.Conn))
+		ep.handleRead(conn.(net.Conn), fd)
 		// if c.closed.Load() {
 		// 	return
 		// }
@@ -252,14 +285,112 @@ func (ep *epoll) handleEvents(fd int, events uint32) {
 
 }
 
-func (ep *epoll) handleRead(conn net.Conn) {
-	_, _, err := wsutil.ReadClientData(conn)
+func (ep *epoll) handleRead(conn net.Conn, fd int) {
+	// For edge-triggered mode, we must read until we get EAGAIN/EWOULDBLOCK
+	for {
+		// Read a single WebSocket message
+		msg, op, err := wsutil.ReadClientData(conn)
+		if err != nil {
+			// Handle different error types
+			var reason string
+			switch {
+			case errors.Is(err, io.EOF):
+				reason = "EOF (client disconnected)"
+			case errors.Is(err, net.ErrClosed):
+				reason = "connection already closed"
+			case errors.Is(err, syscall.EPIPE):
+				reason = "broken pipe"
+			case errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK):
+				// In edge-triggered mode, this means we've read all available data
+				return
+			default:
+				if opErr, ok := err.(*net.OpError); ok {
+					if errors.Is(opErr.Err, syscall.ECONNRESET) {
+						reason = "connection reset by peer"
+					} else if errors.Is(opErr.Err, syscall.ETIMEDOUT) {
+						reason = "read timeout"
+					}
+				}
+				if reason == "" {
+					reason = fmt.Sprintf("read error: %v", err)
+				}
+			}
 
-	if err != nil {
-		// handle error
+			log.Printf("Closing FD %d: %s", fd, reason)
+			ep.deleteAndClose(conn)
+			return
+		}
+
+		// Process the message (example implementation)
+		if err := ep.processMessage(conn, fd, msg, op); err != nil {
+			log.Printf("Failed to process message on FD %d: %v", fd, err)
+			ep.deleteAndClose(conn)
+			return
+		}
+
+		// For edge-triggered mode, we should continue reading to drain the buffer
+		// until we get EAGAIN/EWOULDBLOCK
 	}
-	// fmt.Println("Msg: ", msg)
 }
+
+// Example message processor (you should customize this)
+func (ep *epoll) processMessage(conn net.Conn, fd int, msg []byte, op ws.OpCode) error {
+	// Simple echo server example:
+	switch op {
+	case ws.OpText, ws.OpBinary:
+		log.Printf("Received message on FD %d: %s", fd, string(msg))
+
+		// Echo the message back
+		if err := wsutil.WriteServerMessage(conn, op, msg); err != nil {
+			return fmt.Errorf("failed to write response: %w", err)
+		}
+
+	case ws.OpClose:
+		return fmt.Errorf("client initiated close")
+
+	case ws.OpPing:
+		// Respond to ping with pong
+		if err := wsutil.WriteServerMessage(conn, ws.OpPong, nil); err != nil {
+			return fmt.Errorf("failed to write pong: %w", err)
+		}
+
+	case ws.OpPong:
+		// Optional: Handle pong (usually no action needed)
+		log.Printf("Received Pong on FD %d", fd)
+
+	default:
+		return fmt.Errorf("unknown WebSocket opcode: %v", op)
+	}
+
+	return nil
+}
+
+// func (ep *epoll) handleRead(conn net.Conn) {
+// 	_, _, err := wsutil.ReadClientData(conn)
+
+// 	if err != nil {
+// 		fd, fdErr := getFd(conn)
+// 		if fdErr != nil {
+// 			return
+// 		}
+
+// 		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) {
+
+// 			fmt.Println("Client FD %d closed connection during read: %v", fd, err)
+// 		} else if opErr, ok := err.(*net.OpError); ok && (errors.Is(opErr.Err, syscall.ECONNRESET) || errors.Is(opErr.Err, syscall.ETIMEDOUT)) {
+
+// 			fmt.Println("Client FD %d network error during read: %v", fd, err)
+// 		} else {
+
+// 			fmt.Println("Error reading from client FD %d: %v", fd, err)
+// 		}
+
+// 		ep.deleteAndClose(conn)
+// 		return
+// 	}
+
+// 	// fmt.Println("Msg: ", msg)
+// }
 
 func workerFunc(id int, ep *epoll, jobChan <-chan eventJob, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -276,17 +407,29 @@ func main() {
 
 	var rlimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit); err != nil {
-		fmt.Println("Error getting rlimit:", err)
-		return
+		log.Fatalf("Error getting initial rlimit: %v", err) // Use log.Fatalf
 	}
-	fmt.Printf("Current limits: Soft=%d, Hard=%d\n", rlimit.Cur, rlimit.Max)
+	log.Printf("Initial limits: Soft=%d, Hard=%d\n", rlimit.Cur, rlimit.Max)
 
-	rlimit.Cur = rlimit.Max
-	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rlimit); err != nil {
-		fmt.Println("Error setting rlimit:", err)
-		return
+	// Prepare the desired limit
+	desiredLimit := rlimit              // Copy struct
+	desiredLimit.Cur = desiredLimit.Max // Try to set soft = hard
+
+	log.Printf("Attempting to set limits: Soft=%d, Hard=%d\n", desiredLimit.Cur, desiredLimit.Max)
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &desiredLimit); err != nil {
+		// THIS IS IMPORTANT! Log the error if setting fails.
+		log.Printf("!!! Error setting rlimit: %v !!!", err)
+		log.Printf("!!! Check user permissions (need root or CAP_SYS_RESOURCE to raise hard limit) !!!")
+		// Decide if you want to exit or continue with potentially lower limits
+		// os.Exit(1) // Optionally exit if setting limit is critical
 	}
-	fmt.Printf("New limits: Soft=%d, Hard=%d\n", rlimit.Cur, rlimit.Max)
+
+	// *** READ BACK THE LIMITS TO SEE WHAT ACTUALLY APPLIES ***
+	var actualLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &actualLimit); err != nil {
+		log.Fatalf("Error getting rlimit AFTER setting attempt: %v", err)
+	}
+	log.Printf(">>> Actual limits AFTER Setrlimit call: Soft=%d, Hard=%d <<<\n", actualLimit.Cur, actualLimit.Max)
 
 	jobChan := make(chan eventJob, *workers*2)
 	shutdownCtx, cancelEpollLoop := context.WithCancel(context.Background())
@@ -295,6 +438,14 @@ func main() {
 		fmt.Println("Failed to initialize epoll", "error", err)
 		os.Exit(1)
 	}
+
+	// Close the epoll file descriptor on shutdown
+	defer func() {
+		log.Printf("Closing epoll FD: %d", epoll.fd)
+		if err := unix.Close(epoll.fd); err != nil {
+			log.Printf("Error closing epoll FD %d: %v", epoll.fd, err)
+		}
+	}()
 
 	workerWg := &sync.WaitGroup{}
 	startWorkers(*workers, epoll, jobChan, workerWg)
@@ -335,4 +486,28 @@ func main() {
 
 }
 
-// sudo sh -c "echo 2621440 > /proc/sys/net/netfilter/nf_conntrack_max"
+// // // sudo sh -c "echo 2621440 > /proc/sys/net/netfilter/nf_conntrack_max"
+
+// // // func (ep *epoll) startConnectionHealthCheck(ctx context.Context) {
+// // // 	ticker := time.NewTicker(30 * time.Second)
+// // // 	defer ticker.Stop()
+
+// // // 	for {
+// // // 		select {
+// // // 		case <-ctx.Done():
+// // // 			return
+// // // 		case <-ticker.C:
+// // // 			ep.connections.Range(func(key, value interface{}) bool {
+// // // 				fd := key.(int)
+// // // 				conn := value.(net.Conn)
+
+// // // 				// Try to write a ping frame
+// // // 				err := wsutil.WriteClientMessage(conn, ws.OpPing, nil)
+// // // 				if err != nil {
+// // // 					ep.deleteAndClose(conn)
+// // // 				}
+// // // 				return true
+// // // 			})
+// // // 		}
+// // // 	}
+// // // }
