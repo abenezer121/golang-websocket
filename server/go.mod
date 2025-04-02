@@ -6,7 +6,11 @@ toolchain go1.23.7
 
 require github.com/google/uuid v1.6.0
 
-require github.com/gorilla/websocket v1.5.3 // indirect
+require (
+	github.com/dullkingsman/go-pkg/roga v0.0.1 // indirect
+	github.com/dullkingsman/go-pkg/utils v0.0.2 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
+)
 
 require (
 	github.com/gobwas/httphead v0.1.0 // indirect
