@@ -25,18 +25,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var (
-	addr             = flag.String("addr", ":8082", "WebSocket service address (e.g., :8080)")
-	metricsAddr      = flag.String("addr", ":8089", "WebSocket service address (e.g., :8080)")
-	workers          = flag.Int("workers", runtime.NumCPU()*2, "Number of worker goroutines")
-	readBufSize      = flag.Int("readBuf", 4096, "Read buffer size per connection")
-	writeBufSize     = flag.Int("writeBuf", 4096, "Write buffer size per connection")
-	readTimeout      = flag.Duration("readTimeout", 60*time.Second, " Read timeout")
-	writeTimeout     = flag.Duration("writeTimeout", 10*time.Second, "write timeout")
-	pingInterval     = flag.Duration("pingInterval", 30*time.Second, "ping interval")
-	epollWaitTimeout = flag.Int("epollWaitTimeout", 100, "epoll wait timeout")
-)
-
 func startWorkers(n int, ep *models.Epoll, jobChan <-chan models.EventJob, wg *sync.WaitGroup, eventQueue *models.EventQueue) {
 	if n <= 0 {
 		n = runtime.NumCPU() * 2
@@ -75,7 +63,7 @@ func workerFunc(id int, ep *models.Epoll, jobChan <-chan models.EventJob, wg *sy
 }
 
 func wsHander(w http.ResponseWriter, r *http.Request, ep *models.Epoll) {
-
+	log.Printf("hello htere")
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
 		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
@@ -115,17 +103,17 @@ func main() {
 
 	util.SetupRlimit(false)
 
-	numWorkers := *workers
+	numWorkers := *models.Workers
 	if numWorkers <= 0 {
 		numWorkers = runtime.NumCPU() * 2
 	}
 
-	jobChan := make(chan models.EventJob, *workers*4)
+	jobChan := make(chan models.EventJob, *models.Workers*4)
 
 	appCtx, cancelApp := context.WithCancel(context.Background())
 	defer cancelApp()
 
-	epollInstance, err := models.NewEpoll(jobChan, appCtx, serverMetrics, *readTimeout, *writeTimeout)
+	epollInstance, err := models.NewEpoll(jobChan, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}
@@ -146,7 +134,7 @@ func main() {
 	// Start Connection Health Checker
 	healthCheckCtx, cancelHealthCheck := context.WithCancel(appCtx) // Inherit from appCtx
 	defer cancelHealthCheck()
-	go epollInstance.StartConnectionHealthCheck(healthCheckCtx, *pingInterval)
+	go epollInstance.StartConnectionHealthCheck(healthCheckCtx, *models.PingInterval)
 
 	// Configure HTTP Server for WebSocket endpoint
 	mux := http.NewServeMux()
@@ -155,15 +143,15 @@ func main() {
 	})
 
 	// Configure and Start Metrics Server (on a separate port)
-	if *metricsAddr != "" {
+	if *models.MetricsAddr != "" {
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", handlers.MetricsHandler(serverMetrics))
 		metricsSrv := &http.Server{
-			Addr:    *metricsAddr,
+			Addr:    *models.MetricsAddr,
 			Handler: metricsMux,
 		}
 		go func() {
-			log.Printf("Starting Metrics server on %s", *metricsAddr)
+			log.Printf("Starting Metrics server on %s", *models.MetricsAddr)
 			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("ERROR: Metrics server failed: %v", err)
 			}
@@ -186,7 +174,7 @@ func main() {
 
 	// Configure and Start Main WebSocket Server
 	srv := &http.Server{
-		Addr:    *addr,
+		Addr:    *models.Addr,
 		Handler: mux,
 
 		ReadTimeout:  10 * time.Second,
@@ -196,7 +184,7 @@ func main() {
 
 	// Goroutine to run the main server
 	go func() {
-		log.Printf("Starting WebSocket server on %s", *addr)
+		log.Printf("Starting WebSocket server on %s", *models.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("FATAL: WebSocket server ListenAndServe failed: %v", err)
 		}

@@ -1,9 +1,23 @@
 package models
 
 import (
+	"flag"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+var (
+	Addr             = flag.String("addr", ":8082", "WebSocket service address (e.g., :8080)")
+	MetricsAddr      = flag.String("metaddr", ":8089", "WebSocket service address (e.g., :8080)")
+	Workers          = flag.Int("workers", runtime.NumCPU()*2, "Number of worker goroutines")
+	ReadBufSize      = flag.Int("readBuf", 4096, "Read buffer size per connection")
+	WriteBufSize     = flag.Int("writeBuf", 4096, "Write buffer size per connection")
+	ReadTimeout      = flag.Duration("readTimeout", 60*time.Second, " Read timeout")
+	WriteTimeout     = flag.Duration("writeTimeout", 10*time.Second, "write timeout")
+	PingInterval     = flag.Duration("pingInterval", 30*time.Second, "ping interval")
+	EpollWaitTimeout = 100
 )
 
 type EventJob struct {
