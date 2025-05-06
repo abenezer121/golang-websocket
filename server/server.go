@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fastsocket/external"
 	"fastsocket/handlers"
 	"fastsocket/models"
 	"fastsocket/util"
 	"flag"
+	"fmt"
+	"github.com/gobwas/ws/wsutil"
+	"github.com/redis/go-redis/v9"
 	"strings"
 
-	// "github.com/dullkingsman/go-pkg/roga/core"
 	"io"
 	"log"
 	"net"
@@ -88,14 +92,143 @@ func wsHander(w http.ResponseWriter, r *http.Request, ep *models.Epoll) {
 	ep.Metrics.UpgradesSuccess.Add(1)
 	log.Printf("WebSocket connection established and added to epoll.")
 }
+
+type Command struct {
+	CommandType string   `json:"command_type"`
+	DriverId    *string  `json:"driver_id,omitempty"`
+	MinLat      *float64 `json:"min_lat,omitempty"`
+	MinLng      *float64 `json:"min_lng,omitempty"`
+	MaxLat      *float64 `json:"max_lat,omitempty"`
+	MaxLng      *float64 `json:"max_lng,omitempty"`
+	Page        *int     `json:"page,omitempty"`
+}
+
+func controlHandler(w http.ResponseWriter, r *http.Request, notifyMap map[string][]net.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client) {
+	// Upgrade HTTP connection to WebSocket
+	conn, _, _, err := ws.UpgradeHTTP(r, w)
+	if err != nil {
+		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+			log.Printf("ERROR: WebSocket upgrade failed: Too many open files (EMFILE/ENFILE). Check RLIMIT_NOFILE. %v", err)
+			http.Error(w, "Server at connection limit", http.StatusServiceUnavailable)
+		} else if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "connection reset by peer") {
+			log.Printf("INFO: WebSocket upgrade failed, client likely disconnected prematurely: %v", err)
+		} else {
+			log.Printf("ERROR: WebSocket upgrade failed: %v", err)
+			http.Error(w, "Failed to upgrade connection", http.StatusInternalServerError)
+		}
+
+		return
+	}
+	//defer func() {
+	//	log.Printf("INFO: Closing connection for %s", conn.RemoteAddr())
+	//	conn.Close()
+	//}()
+	log.Println("Control client connected:", conn.RemoteAddr())
+	go func() {
+		for {
+			msg, op, err := wsutil.ReadClientData(conn)
+			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+					log.Printf("INFO: Client %s disconnected: %v", conn.RemoteAddr(), err)
+				} else if _, ok := err.(wsutil.ClosedError); ok {
+					log.Printf("INFO: Client %s disconnected (wsutil.ClosedError): %v", conn.RemoteAddr(), err)
+				} else {
+					log.Printf("ERROR: Read error from client %s: %v (OpCode: %v)", conn.RemoteAddr(), err, op)
+				}
+				break
+			}
+
+			// get-drivers-in-bbox // get-drivers // track-driver
+			var decodedMsg Command
+			if err := json.Unmarshal([]byte(msg), &decodedMsg); err != nil {
+				log.Printf("ERROR: Failed to unmarshal JSON from %s: %v. Message: %s", conn.RemoteAddr(), err, string(msg))
+				errMsg := []byte(`{"error": "Invalid JSON format"}`)
+				if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, errMsg); writeErr != nil {
+					log.Printf("ERROR: Failed to send JSON error message to %s: %v", conn.RemoteAddr(), writeErr)
+					break
+				}
+				continue
+			}
+
+			switch decodedMsg.CommandType {
+			case "get-bbox":
+				log.Printf("INFO: Handling 'get-bbox' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
+				if decodedMsg.MinLat == nil || decodedMsg.MinLng == nil || decodedMsg.MaxLat == nil || decodedMsg.MaxLng == nil {
+					continue
+				}
+				log.Printf("INFO: Handling 'get-drivers' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
+				paginated, err := external.FindWorkersInBBox(rd, *decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MinLng)
+				if err != nil {
+					continue
+				}
+				responseBytes, marshalErr := json.Marshal(paginated)
+				if marshalErr != nil {
+					log.Printf("ERROR: Failed to marshal response for %s: %v", conn.RemoteAddr(), marshalErr)
+					continue
+				}
+				if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, responseBytes); writeErr != nil {
+					log.Printf("ERROR: Failed to send driver_id error message to %s: %v", conn.RemoteAddr(), writeErr)
+					break
+				}
+			case "get-drivers":
+				if decodedMsg.Page == nil {
+					continue
+				}
+				log.Printf("INFO: Handling 'get-drivers' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
+				paginated, _, err := external.GetAllWorkersPaginated(rd, *decodedMsg.Page, 100)
+				if err != nil {
+					continue
+				}
+				responseBytes, marshalErr := json.Marshal(paginated)
+				if marshalErr != nil {
+					log.Printf("ERROR: Failed to marshal response for %s: %v", conn.RemoteAddr(), marshalErr)
+					continue
+				}
+				if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, responseBytes); writeErr != nil {
+					log.Printf("ERROR: Failed to send driver_id error message to %s: %v", conn.RemoteAddr(), writeErr)
+					break
+				}
+
+			case "track-driver":
+				log.Printf("INFO: Handling 'track-driver' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
+				if decodedMsg.DriverId == nil || *decodedMsg.DriverId == "" {
+					log.Printf("WARN: 'track-driver' command from %s missing valid driver_id. Message: %s", conn.RemoteAddr(), string(msg))
+					errMsg := []byte(`{"error": "track-driver command requires a valid driver_id"}`)
+					if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, errMsg); writeErr != nil {
+						log.Printf("ERROR: Failed to send driver_id error message to %s: %v", conn.RemoteAddr(), writeErr)
+						break
+					}
+					continue
+				} else {
+					driverID := *decodedMsg.DriverId
+
+					notifyMapMutex.Lock()
+					notifyMap[driverID] = append(notifyMap[driverID], conn)
+					log.Printf("INFO: Client %s is now tracking driver_id: %s. Total trackers for this driver: %d", conn.RemoteAddr(), driverID, len(notifyMap[driverID]))
+					notifyMapMutex.Unlock()
+
+					ackMsg := []byte(fmt.Sprintf(`{"status": "now tracking driver_id %s"}`, driverID))
+					if err = wsutil.WriteServerMessage(conn, ws.OpText, ackMsg); err != nil {
+						log.Printf("ERROR: Failed to send tracking ack to %s: %v", conn.RemoteAddr(), err)
+						break
+					}
+				}
+			default:
+				log.Printf("WARN: Unknown command_type '%s' from %s. Message: %s", decodedMsg.CommandType, conn.RemoteAddr(), string(msg))
+				errMsg := []byte(fmt.Sprintf(`{"error": "Unknown command_type: %s"}`, decodedMsg.CommandType))
+				if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, errMsg); writeErr != nil {
+					log.Printf("ERROR: Failed to send unknown command error message to %s: %v", conn.RemoteAddr(), writeErr)
+					break
+				}
+			}
+
+		}
+	}()
+
+}
+
 func main() {
 	flag.Parse()
-	// functions begin operation
-	// funcion end operation
-	// roga
-
-	// serviceName
-	//roga := core.Init(core.Config{ServiceName: "SocketServer"})
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 	// Initialize Metrics
@@ -113,7 +246,14 @@ func main() {
 	appCtx, cancelApp := context.WithCancel(context.Background())
 	defer cancelApp()
 
-	epollInstance, err := models.NewEpoll(jobChan, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout)
+	notifyMap := make(map[string][]net.Conn)
+	notifyMapMutex := &sync.RWMutex{}
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+		DB:   0,
+	})
+
+	epollInstance, err := models.NewEpoll(jobChan, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}
@@ -140,6 +280,12 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		wsHander(w, r, epollInstance)
+	})
+
+	// track
+	// get path
+	mux.HandleFunc("/activity", func(w http.ResponseWriter, r *http.Request) {
+		controlHandler(w, r, notifyMap, notifyMapMutex, rdb)
 	})
 
 	// Configure and Start Metrics Server (on a separate port)
@@ -237,3 +383,9 @@ func main() {
 }
 
 // get all my drivers paginated
+// functions begin operation
+// funcion end operation
+// roga
+
+// serviceName
+//roga := core.Init(core.Config{ServiceName: "SocketServer"})

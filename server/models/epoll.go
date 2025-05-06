@@ -13,7 +13,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"sort"
 	"strconv"
 	"sync"
 	"syscall"
@@ -41,30 +40,30 @@ type Epoll struct {
 	WorkerChan  chan<- EventJob
 	ShutdownCtx context.Context
 	ShutdownWg  sync.WaitGroup // to wait for the epoll loop
-
 	// roga    core.Roga
+
+	// notify map
+	NotifyMap      map[string][]net.Conn
+	NotifyMapMutex *sync.RWMutex
 }
 
-func NewEpoll(workerChan chan<- EventJob, shutdownCtx context.Context, m *Metrics, rt, wt time.Duration) (*Epoll, error) {
+func NewEpoll(workerChan chan<- EventJob, shutdownCtx context.Context, m *Metrics, rt, wt time.Duration, notifyMap map[string][]net.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client) (*Epoll, error) {
 	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		return nil, fmt.Errorf("epoll_create1: %w", err)
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-		DB:   0,
-	})
-
 	log.Printf("Created epoll instance with fd: %d", fd)
 	e := &Epoll{
-		Fd:           fd,
-		Metrics:      m,
-		WorkerChan:   workerChan,
-		ShutdownCtx:  shutdownCtx,
-		ReadTimeout:  rt,
-		WriteTimeout: wt,
-		redis:        rdb,
+		Fd:             fd,
+		Metrics:        m,
+		WorkerChan:     workerChan,
+		ShutdownCtx:    shutdownCtx,
+		ReadTimeout:    rt,
+		WriteTimeout:   wt,
+		redis:          rd,
+		NotifyMap:      notifyMap,
+		NotifyMapMutex: notifyMapMutex,
 	}
 	e.ShutdownWg.Add(1)
 	go e.Wait()
@@ -79,7 +78,63 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 	nowUnixStr := strconv.FormatInt(now.Unix(), 10)
 
 	pipe := ep.redis.Pipeline()
+	ep.NotifyMapMutex.RLock()
+	conns, ok := ep.NotifyMap[workerId]
+	ep.NotifyMapMutex.RUnlock()
+	type LocationUpdate struct {
+		WorkerID  string  `json:"worker_id"`
+		Latitude  float64 `json:"lat"`
+		Longitude float64 `json:"lng"`
+		Timestamp string  `json:"timestamp"`
+		UnixTime  string  `json:"unix_time"`
+	}
+	if ok {
+		broken := []int{} // collect indexes of dead connections
+		update := LocationUpdate{
+			WorkerID:  workerId,
+			Latitude:  lat,
+			Longitude: lng,
+			Timestamp: nowStr,
+			UnixTime:  nowUnixStr,
+		}
 
+		msg, err := json.Marshal(update)
+		if err != nil {
+			return fmt.Errorf("json marshal error: %w", err)
+		}
+
+		for i, conn := range conns {
+			err := wsutil.WriteServerMessage(conn, ws.OpText, msg)
+			if err != nil {
+				log.Printf("Failed to write to connection for worker %s: %v", workerId, err)
+				broken = append(broken, i)
+			}
+		}
+		// clean up broken connections
+		if len(broken) > 0 {
+			ep.NotifyMapMutex.Lock()
+			alive := make([]net.Conn, 0, len(conns)-len(broken))
+			for i, conn := range conns {
+				skip := false
+				for _, badIndex := range broken {
+					if i == badIndex {
+						skip = true
+						break
+					}
+				}
+				if !skip {
+					alive = append(alive, conn)
+				}
+			}
+
+			if len(alive) > 0 {
+				ep.NotifyMap[workerId] = alive
+			} else {
+				delete(ep.NotifyMap, workerId)
+			}
+			ep.NotifyMapMutex.Unlock()
+		}
+	}
 	// update workers geo location
 	pipe.GeoAdd(ctx, WorkerLocationSet, &redis.GeoLocation{
 		Name:      workerId,
@@ -259,152 +314,6 @@ func (ep *Epoll) CheckAndUpdateWorkerStatus() error {
 	return err
 }
 
-func (ep *Epoll) FindWorkersInBBox(minLat, minLng, maxLat, maxLng float64) ([]*WorkersToTrack, error) {
-	ctx := context.Background()
-
-	if minLat >= maxLat || minLng >= maxLng {
-		return nil, errors.New("invalid bounding box coordinates")
-	}
-
-	centerLat := (minLat + maxLat) / 2
-	centerLng := (minLng + maxLng) / 2
-	height := maxLat - minLat
-	width := maxLng - minLng
-
-	searchQuery := &redis.GeoSearchLocationQuery{
-		GeoSearchQuery: redis.GeoSearchQuery{
-			Longitude: centerLng,
-			Latitude:  centerLat,
-			BoxWidth:  width,
-			BoxHeight: height,
-
-			Count: 1000,
-		},
-		WithCoord: true,
-		WithDist:  true,
-	}
-
-	locations, err := ep.redis.GeoSearchLocation(ctx, WorkerLocationSet, searchQuery).Result()
-	if err != nil {
-		// Handle case where the key doesn't exist gracefully
-		if errors.Is(err, redis.Nil) {
-			return []*WorkersToTrack{}, nil // No workers found is not an error
-		}
-		log.Printf("Error executing GeoSearchLocation: %v\n", err)
-		return nil, fmt.Errorf("failed to search worker locations: %w", err)
-	}
-
-	if len(locations) == 0 {
-		return []*WorkersToTrack{}, nil // No workers found in the bbox
-	}
-
-	workerIdsInBox := make([]string, 0, len(locations))
-	for _, loc := range locations {
-		workerIdsInBox = append(workerIdsInBox, loc.Name)
-	}
-
-	detailsData, err := ep.redis.HMGet(ctx, WorkerDetailsHash, workerIdsInBox...).Result()
-	if err != nil {
-		log.Printf("Error fetching worker details with HMGet: %v\n", err)
-		return nil, fmt.Errorf("failed to fetch worker details: %w", err)
-	}
-
-	workers := make([]*WorkersToTrack, 0, len(locations))
-	for i, data := range detailsData {
-		if data == nil {
-			// Worker ID found in GeoSet but not in Details Hash (potential inconsistency)
-			log.Printf("Worker %s found in GeoSet but missing details in %s\n", workerIdsInBox[i], WorkerDetailsHash)
-			continue
-		}
-
-		detailStr, ok := data.(string)
-		if !ok {
-			log.Printf("Unexpected data type for worker %s detail: %T\n", workerIdsInBox[i], data)
-			continue
-		}
-
-		var worker WorkersToTrack
-		if err := json.Unmarshal([]byte(detailStr), &worker); err != nil {
-			log.Printf("Error unmarshalling worker detail for %s: %v\n", workerIdsInBox[i], err)
-			continue
-		}
-		if worker.Active {
-
-			workers = append(workers, &worker)
-		}
-	}
-
-	return workers, nil
-}
-
-func (ep *Epoll) GetAllWorkersPaginated(page, pageSize int) ([]*WorkersToTrack, int, error) {
-	ctx := context.Background()
-
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 10
-	}
-
-	allWorkerIds, err := ep.redis.HKeys(ctx, WorkerDetailsHash).Result()
-	if err != nil {
-		log.Printf("Error fetching all worker keys from %s: %v\n", WorkerDetailsHash, err)
-		return nil, 0, fmt.Errorf("failed to get worker keys: %w", err)
-	}
-
-	totalWorkers := len(allWorkerIds)
-	if totalWorkers == 0 {
-		return []*WorkersToTrack{}, 0, nil
-	}
-
-	sort.Strings(allWorkerIds)
-
-	start := (page - 1) * pageSize
-	if start >= totalWorkers {
-		return []*WorkersToTrack{}, totalWorkers, nil
-	}
-
-	end := start + pageSize
-	if end > totalWorkers {
-		end = totalWorkers
-	}
-
-	paginatedWorkerIds := allWorkerIds[start:end]
-
-	if len(paginatedWorkerIds) == 0 {
-		return []*WorkersToTrack{}, totalWorkers, nil
-	}
-
-	detailsData, err := ep.redis.HMGet(ctx, WorkerDetailsHash, paginatedWorkerIds...).Result()
-	if err != nil {
-		log.Printf("Error fetching paginated worker details with HMGet: %v\n", err)
-		return nil, totalWorkers, fmt.Errorf("failed to fetch worker details for page %d: %w", page, err)
-	}
-
-	workers := make([]*WorkersToTrack, 0, len(paginatedWorkerIds))
-	for i, data := range detailsData {
-		if data == nil {
-			log.Printf("Details not found for paginated worker %s in %s\n", paginatedWorkerIds[i], WorkerDetailsHash)
-			continue
-		}
-
-		detailStr, ok := data.(string)
-		if !ok {
-			log.Printf("Unexpected data type for worker %s detail: %T\n", paginatedWorkerIds[i], data)
-			continue
-		}
-
-		var worker WorkersToTrack
-		if err := json.Unmarshal([]byte(detailStr), &worker); err != nil {
-			log.Printf("Error unmarshalling worker detail for %s: %v\n", paginatedWorkerIds[i], err)
-			continue
-		}
-		workers = append(workers, &worker)
-	}
-
-	return workers, totalWorkers, nil
-}
 func (ep *Epoll) Add(conn net.Conn) error {
 
 	fd, err := util.GetFd(conn)
@@ -413,7 +322,7 @@ func (ep *Epoll) Add(conn net.Conn) error {
 		return fmt.Errorf("failed to get file descriptor: %w", err)
 	}
 
-	// Add connection FD to epoll with edge-triggered monitoring for read, write readiness, and peer close.
+	// Add connection FD to epoll with edge-triggered monitoring for `read`, write readiness, and peer close.
 	// EPOLLET (Edge Triggered): Notify only on changes. Requires careful reading/writing all available data.
 	// EPOLLIN: Monitor for read readiness.
 	// EPOLLOUT: Monitor for write readiness (useful for handling backpressure, currently write handling is basic).
