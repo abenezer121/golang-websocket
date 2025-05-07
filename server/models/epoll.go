@@ -6,8 +6,7 @@ import (
 	"errors"
 	"fastsocket/util"
 	"fmt"
-	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sys/unix"
 	"io"
@@ -35,19 +34,17 @@ type Epoll struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 
-	activeWorkers sync.Map
-
 	WorkerChan  chan<- EventJob
 	ShutdownCtx context.Context
 	ShutdownWg  sync.WaitGroup // to wait for the epoll loop
 	// roga    core.Roga
 
 	// notify map
-	NotifyMap      map[string][]net.Conn
+	NotifyMap      map[string][]*websocket.Conn
 	NotifyMapMutex *sync.RWMutex
 }
 
-func NewEpoll(workerChan chan<- EventJob, shutdownCtx context.Context, m *Metrics, rt, wt time.Duration, notifyMap map[string][]net.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client) (*Epoll, error) {
+func NewEpoll(workerChan chan<- EventJob, shutdownCtx context.Context, m *Metrics, rt, wt time.Duration, notifyMap map[string][]*websocket.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client) (*Epoll, error) {
 	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		return nil, fmt.Errorf("epoll_create1: %w", err)
@@ -81,13 +78,7 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 	ep.NotifyMapMutex.RLock()
 	conns, ok := ep.NotifyMap[workerId]
 	ep.NotifyMapMutex.RUnlock()
-	type LocationUpdate struct {
-		WorkerID  string  `json:"worker_id"`
-		Latitude  float64 `json:"lat"`
-		Longitude float64 `json:"lng"`
-		Timestamp string  `json:"timestamp"`
-		UnixTime  string  `json:"unix_time"`
-	}
+
 	if ok {
 		broken := []int{} // collect indexes of dead connections
 		update := LocationUpdate{
@@ -98,13 +89,18 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 			UnixTime:  nowUnixStr,
 		}
 
-		msg, err := json.Marshal(update)
+		response := SocketResponse{
+			Command:    "track",
+			DriverData: update,
+		}
+
+		msg, err := json.Marshal(response)
 		if err != nil {
 			return fmt.Errorf("json marshal error: %w", err)
 		}
 
 		for i, conn := range conns {
-			err := wsutil.WriteServerMessage(conn, ws.OpText, msg)
+			err := conn.WriteMessage(websocket.TextMessage, msg)
 			if err != nil {
 				log.Printf("Failed to write to connection for worker %s: %v", workerId, err)
 				broken = append(broken, i)
@@ -113,7 +109,7 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 		// clean up broken connections
 		if len(broken) > 0 {
 			ep.NotifyMapMutex.Lock()
-			alive := make([]net.Conn, 0, len(conns)-len(broken))
+			alive := make([]*websocket.Conn, 0, len(conns)-len(broken))
 			for i, conn := range conns {
 				skip := false
 				for _, badIndex := range broken {
@@ -314,7 +310,7 @@ func (ep *Epoll) CheckAndUpdateWorkerStatus() error {
 	return err
 }
 
-func (ep *Epoll) Add(conn net.Conn) error {
+func (ep *Epoll) Add(conn *websocket.Conn) error {
 
 	fd, err := util.GetFd(conn)
 	if err != nil {
@@ -383,7 +379,7 @@ func (ep *Epoll) Delete(fd int) error {
 
 }
 
-func (ep *Epoll) DeleteAndClose(fd int, conn net.Conn, reason string, byPeer bool) {
+func (ep *Epoll) DeleteAndClose(fd int, conn *websocket.Conn, reason string, byPeer bool) {
 	_ = ep.Delete(fd)
 	if conn != nil {
 
@@ -408,14 +404,12 @@ func (ep *Epoll) DeleteAndClose(fd int, conn net.Conn, reason string, byPeer boo
 }
 
 func (ep *Epoll) Wait() {
-	// signal the gorouting has finished
 	defer ep.ShutdownWg.Done()
 	defer log.Println("Epoll wait loop stopped.")
+	log.Println("Starting epoll wait loop for direct event processing...")
 
-	log.Println("Starting epoll wait loop...")
+	events := make([]unix.EpollEvent, 128) // Buffer for epoll events
 
-	events := make([]unix.EpollEvent, 128)
-	eventQueue := &EventQueue{}
 	for {
 		select {
 		case <-ep.ShutdownCtx.Done():
@@ -423,261 +417,167 @@ func (ep *Epoll) Wait() {
 			return
 		default:
 		}
+
 		n, err := unix.EpollWait(ep.Fd, events, EpollWaitTimeout)
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
 				continue
 			}
-			// EBADF (bad file descriptor),
 			if errors.Is(err, unix.EBADF) {
-				log.Println("Epoll wait returned EBADF, likely closed during shutdown.")
+				log.Println("ERROR: EpollWait returned EBADF, epoll FD likely closed. Stopping loop.")
 				return
 			}
 			log.Printf("ERROR: EpollWait failed: %v", err)
 			ep.Metrics.EpollErrors.Add(1)
 
-			// Prevent busy-looping on persistent errors
 			select {
 			case <-time.After(100 * time.Millisecond):
 			case <-ep.ShutdownCtx.Done():
-				log.Println("Shutdown signal received after epoll error.")
 				return
 			}
 			continue
-
 		}
+
+		// Process events concurrently for better handling of multiple clients
 		for i := 0; i < n; i++ {
 			ev := &events[i]
-			job := EventJob{
-				Fd:     int(ev.Fd),
-				Events: ev.Events,
-			}
+			fd := int(ev.Fd)
+			eventFlags := ev.Events
+
 			select {
-			case ep.WorkerChan <- job:
 			case <-ep.ShutdownCtx.Done():
-				log.Println("Shutdown while dispatching epoll event, discarding job.")
 				return
 			default:
-				eventQueue.enqueue(job)
-				// log.Printf("WARNING: Worker channel full. Queuing event for FD %d (Events: 0x%x).", job.fd, job.events)
+				// make this go routing pool
+				go func(fd int, flags uint32) {
+					ep.HandleEvents(fd, flags)
+				}(fd, eventFlags)
 			}
 		}
 	}
 }
-
 func (ep *Epoll) HandleEvents(fd int, events uint32) {
-	connVal, ok := ep.Connections.Load(fd)
 
+	connVal, ok := ep.Connections.Load(fd)
 	if !ok {
-		// Connection might have been closed and removed between event generation and processing.
+		log.Printf("WARN: HandleEvents: No connection found for FD %d. Events: 0x%x. Possibly already closed/removed.", fd, events)
 		_ = ep.Delete(fd)
 		return
 	}
-	conn := connVal.(net.Conn)
-
-	// Check for errors or hangup events first.
-	// EPOLLRDHUP indicates the peer has closed their writing end or the whole connection.
-	// EPOLLHUP often indicates an unexpected close or reset.
-	// EPOLLERR indicates an error on the FD.
-	if events&(unix.EPOLLERR|unix.EPOLLHUP) != 0 {
-		log.Printf("Handling EPOLLERR/EPOLLHUP for FD %d", fd)
-		ep.Metrics.ReadErrors.Add(1)                                   // Count as a read/general error
-		ep.DeleteAndClose(fd, conn, "Epoll error/hangup event", false) // Server closing due to error
-		return
-	}
-
-	if events&unix.EPOLLRDHUP != 0 {
-		log.Printf("Handling EPOLLRDHUP for FD %d (peer closed write end or connection)", fd)
-		ep.DeleteAndClose(fd, conn, "Peer closed connection (RDHUP)", true) // Closed by peer
-		return
-	}
-
-	if events&unix.EPOLLOUT != 0 {
-	}
+	conn := connVal.(*websocket.Conn)
 
 	if events&unix.EPOLLIN != 0 {
 		ep.HandleRead(fd, conn)
+		return
+
 	}
 
+	if events&unix.EPOLLHUP != 0 || events&unix.EPOLLERR != 0 {
+
+		log.Printf("Client disconnected (fd: %d)", fd)
+		err := ep.Delete(fd)
+		if err != nil {
+		}
+		return
+	}
 }
 
-func (ep *Epoll) HandleRead(fd int, conn net.Conn) {
-	// For edge-triggered mode, we must read until we get EAGAIN/EWOULDBLOCK
-	// to ensure we process all available data notified by the edge trigger.
+// In Edge-Triggered (EPOLLET) mode, we must read until EAGAIN/EWOULDBLOCK.
+func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 	for {
+		if _, stillConnected := ep.Connections.Load(fd); !stillConnected {
+			log.Printf("DEBUG: HandleRead: Connection for FD %d (%s) no longer in map, exiting read loop.", fd, conn.RemoteAddr())
+			return
+		}
+
+		// Set read deadline for this specific read operation.
 		if ep.ReadTimeout > 0 {
 			if err := conn.SetReadDeadline(time.Now().Add(ep.ReadTimeout)); err != nil {
-				log.Printf("WARN: Failed to set read deadline for FD %d before read: %v", fd, err)
+				log.Printf("WARN: HandleRead: Failed to set read deadline for FD %d (%s): %v. Closing.", fd, conn.RemoteAddr(), err)
 				ep.Metrics.ReadErrors.Add(1)
-				ep.DeleteAndClose(fd, conn, "Failed to set read deadline", false)
-				return
+				ep.DeleteAndClose(fd, conn, fmt.Sprintf("SetReadDeadline failed: %v", err), false)
+				return // Exit read loop and HandleRead
 			}
 		}
 
-		msg, op, err := wsutil.ReadClientData(conn)
+		log.Printf("DEBUG: HandleRead FD %d (%s): Attempting ReadMessage", fd, conn.RemoteAddr())
+		msgType, msg, err := conn.ReadMessage()
 
 		if err != nil {
 
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
-				log.Printf("DEBUG: Read on FD %d returned EAGAIN/EWOULDBLOCK (expected in ET)", fd)
+				log.Printf("DEBUG: Read on FD %d (%s) returned EAGAIN/EWOULDBLOCK (expected in ET if all data read)", fd, conn.RemoteAddr())
 				return
 			}
 
-			// Handle different error types
-			var reason string
-			closedByPeer := false
-			if errors.Is(err, io.EOF) {
-				reason = "EOF (client disconnected)"
-				closedByPeer = true
+			// Check for common client-initiated close errors
+			isPeerClose := websocket.IsCloseError(err,
+				websocket.CloseNormalClosure,
+				websocket.CloseGoingAway,
+				websocket.CloseAbnormalClosure,
+				websocket.CloseNoStatusReceived,
+			) || errors.Is(err, io.EOF)
+
+			errMsg := fmt.Sprintf("ReadMessage error: %v", err)
+			if isPeerClose {
+
+				errMsg = fmt.Sprintf("Peer closed connection during read: %v", err)
 			} else if errors.Is(err, net.ErrClosed) {
-				reason = "Connection already closed"
-				ep.Delete(fd)
-				return
-			} else if errors.Is(err, syscall.ECONNRESET) {
-				reason = "Connection reset by peer"
-				ep.Metrics.ReadErrors.Add(1)
-				closedByPeer = true
-			} else if errors.Is(err, syscall.EPIPE) {
-				reason = "Broken pipe"
-				ep.Metrics.ReadErrors.Add(1)
-				closedByPeer = true
-			} else if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
-				reason = "Read timeout"
-				ep.Metrics.ReadErrors.Add(1)
-
-			} else {
-
-				reason = fmt.Sprintf("Unexpected read error: %v", err)
-				log.Printf("ERROR: %s on FD %d", reason, fd)
-				ep.Metrics.ReadErrors.Add(1)
-
+				errMsg = "Connection already closed" // This might happen if closed by another goroutine (e.g. health check)
 			}
 
-			log.Printf("Closing FD %d due to read issue: %s", fd, reason)
-			ep.DeleteAndClose(fd, conn, reason, closedByPeer)
+			log.Printf("INFO: Closing connection for FD %d (%s) due to: %s", fd, conn.RemoteAddr(), errMsg)
+			ep.Metrics.ReadErrors.Add(1)
+			ep.DeleteAndClose(fd, conn, errMsg, isPeerClose)
 			return
 		}
+
 		ep.Metrics.MessagesReceived.Add(1)
 		ep.Metrics.BytesReceived.Add(int64(len(msg)))
-		if err := ep.ProcessMessage(fd, conn, msg, op); err != nil {
-			log.Printf("ERROR: Failed to process message on FD %d: %v. Closing connection.", fd, err)
-			ep.Metrics.ProcessingErrors.Add(1)
-			ep.DeleteAndClose(fd, conn, fmt.Sprintf("Message processing failed: %v", err), false)
+
+		switch msgType {
+		case websocket.TextMessage, websocket.BinaryMessage:
+			var worker WorkersToTrack
+			jsonErr := json.Unmarshal(msg, &worker)
+			if jsonErr != nil {
+				log.Printf("ERROR: Failed to unmarshal message on FD %d (%s): %v. Content: %s. Closing.", fd, conn.RemoteAddr(), jsonErr, string(msg))
+				ep.Metrics.ProcessingErrors.Add(1)
+				ep.DeleteAndClose(fd, conn, fmt.Sprintf("Message unmarshal failed: %v", jsonErr), false)
+				return
+			}
+
+			fmt.Printf("Received worker data from FD %d (%s): %+v\n", fd, conn.RemoteAddr(), worker)
+			err = ep.UpdateWorkersLocation(worker.Id, worker.Lat, worker.Lng)
+			// If this processing is slow, it blocks the entire Epoll.Wait loop.
+
+		case websocket.CloseMessage:
+
+			log.Printf("INFO: Received WebSocket Close frame from FD %d (%s). Closing connection.", fd, conn.RemoteAddr())
+
+			ep.DeleteAndClose(fd, conn, "Received WebSocket close frame", true)
 			return
-		}
 
-	}
-}
+		case websocket.PingMessage:
 
-func (ep *Epoll) ProcessMessage(fd int, conn net.Conn, msg []byte, op ws.OpCode) error {
-
-	switch op {
-	case ws.OpText, ws.OpBinary:
-		if ep.WriteTimeout > 0 {
-
-			if err := conn.SetWriteDeadline(time.Now().Add(ep.WriteTimeout)); err != nil {
-
-				return fmt.Errorf("failed to set write deadline before echo: %w", err)
+			if err := conn.SetReadDeadline(time.Now().Add(ep.ReadTimeout)); err != nil { // Reset deadline after control frame
+				log.Printf("WARN: HandleRead: Failed to reset read deadline after Ping for FD %d: %v. Closing.", fd, err)
+				ep.DeleteAndClose(fd, conn, "Failed to set read deadline post-ping", false)
+				return
 			}
-		}
-		err := wsutil.WriteServerMessage(conn, op, msg)
-		if err != nil {
+			continue
 
-			if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
-				return fmt.Errorf("write failed (likely closed connection): %w", err)
-			} else if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
-				return fmt.Errorf("write timeout: %w", err)
+		case websocket.PongMessage:
+
+			if err := conn.SetReadDeadline(time.Now().Add(ep.ReadTimeout)); err != nil { // Reset deadline
+				log.Printf("WARN: HandleRead: Failed to reset read deadline after Pong for FD %d: %v. Closing.", fd, err)
+				ep.DeleteAndClose(fd, conn, "Failed to set read deadline post-pong", false)
+				return
 			}
+			continue
 
-			return fmt.Errorf("failed to write echo response: %w", err)
+		default:
+			log.Printf("WARN: Received unknown message type %d from FD %d (%s).", msgType, fd, conn.RemoteAddr())
 		}
-		ep.Metrics.MessagesSent.Add(1)
-		ep.Metrics.BytesSent.Add(int64(len(msg)))
 
-	case ws.OpClose:
-		log.Printf("Client initiated close on FD %d", fd)
-		return errors.New("client initiated close")
-	case ws.OpPing:
-		if ep.WriteTimeout > 0 {
-			if err := conn.SetWriteDeadline(time.Now().Add(ep.WriteTimeout)); err != nil {
-				return fmt.Errorf("failed to set write deadline before pong: %w", err)
-			}
-		}
-		if err := wsutil.WriteServerMessage(conn, ws.OpPong, nil); err != nil {
-			return fmt.Errorf("failed to write pong: %w", err)
-		}
-		ep.Metrics.MessagesSent.Add(1)
-
-	case ws.OpPong:
-		ep.Metrics.PongsReceived.Add(1)
-
-	default:
-		log.Printf("WARN: Received unknown WebSocket opcode %v on FD %d", op, fd)
-		return fmt.Errorf("unknown WebSocket opcode: %v", op)
-	}
-
-	var worker WorkersToTrack
-	err := json.Unmarshal(msg, &worker)
-	if err != nil {
-		fmt.Printf("Failed to parse worker message: %v\n", err)
-		return err
-	}
-
-	err = ep.UpdateWorkersLocation(worker.Id, worker.Lat, worker.Lng)
-	if err != nil {
-		//return err
-	}
-	return nil
-}
-
-func (ep *Epoll) StartConnectionHealthCheck(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		log.Println("Connection health check (ping) disabled.")
-		return
-	}
-
-	log.Printf("Starting connection health check (ping interval: %s)", interval)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	defer log.Println("Connection health check stopped.")
-
-	for {
-		select {
-		case <-ctx.Done():
-			return // Shutdown signal
-		case <-ticker.C:
-			// log.Println("DEBUG: Running periodic health check (ping)")
-			ep.Connections.Range(func(key, value interface{}) bool {
-				select {
-				case <-ctx.Done(): // Check shutdown again inside loop
-					return false // Stop iteration
-				default:
-				}
-
-				fd := key.(int)
-				conn := value.(net.Conn)
-
-				if ep.WriteTimeout > 0 {
-					deadline := time.Now().Add(ep.WriteTimeout)
-					if err := conn.SetWriteDeadline(deadline); err != nil {
-						log.Printf("WARN: Health check: Failed to set write deadline for FD %d: %v", fd, err)
-
-					}
-				}
-
-				err := wsutil.WriteServerMessage(conn, ws.OpPing, nil)
-				if err != nil {
-					log.Printf("Health check: Failed to send Ping to FD %d: %v. Closing connection.", fd, err)
-					ep.Metrics.WriteErrors.Add(1)
-
-					ep.DeleteAndClose(fd, conn, fmt.Sprintf("Ping failed: %v", err), false) // Closed by server
-
-					return true
-				}
-				ep.Metrics.PingsSent.Add(1)
-
-				return true
-			})
-		}
 	}
 }

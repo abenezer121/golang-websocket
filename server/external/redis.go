@@ -9,6 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"log"
 	"sort"
+	"time"
 )
 
 func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64) ([]models.WorkersToTrack, error) {
@@ -38,9 +39,9 @@ func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64)
 
 	locations, err := rd.GeoSearchLocation(ctx, models.WorkerLocationSet, searchQuery).Result()
 	if err != nil {
-		// Handle case where the key doesn't exist gracefully
+
 		if errors.Is(err, redis.Nil) {
-			return []models.WorkersToTrack{}, nil // No workers found is not an error
+			return []models.WorkersToTrack{}, nil
 		}
 		log.Printf("Error executing GeoSearchLocation: %v\n", err)
 		return nil, fmt.Errorf("failed to search worker locations: %w", err)
@@ -64,7 +65,7 @@ func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64)
 	workers := make([]models.WorkersToTrack, 0, len(locations))
 	for i, data := range detailsData {
 		if data == nil {
-			// Worker ID found in GeoSet but not in Details Hash (potential inconsistency)
+
 			log.Printf("Worker %s found in GeoSet but missing details in %s\n", workerIdsInBox[i], models.WorkerDetailsHash)
 			continue
 		}
@@ -135,6 +136,10 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Work
 	}
 
 	workers := make([]models.WorkersToTrack, 0, len(paginatedWorkerIds))
+	now := time.Now()
+	oneMinuteAgo := now.Add(-1 * time.Minute)
+	needsUpdate := make(map[string]models.WorkersToTrack)
+
 	for i, data := range detailsData {
 		if data == nil {
 			log.Printf("Details not found for paginated worker %s in %s\n", paginatedWorkerIds[i], models.WorkerDetailsHash)
@@ -153,8 +158,51 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Work
 			continue
 		}
 
+		// Parse the UpdatedAt string into a time.Time object
+		updatedAt, err := time.Parse(time.RFC3339, worker.UpdatedAt) // Adjust layout based on your actual format
+		if err != nil {
+			log.Printf("Error parsing UpdatedAt for worker %s: %v\n", paginatedWorkerIds[i], err)
+			continue
+		}
+
+		// Check if the worker was updated more than 1 minute ago and is still marked as active
+		if updatedAt.Before(oneMinuteAgo) && worker.Active {
+			worker.Active = false
+			worker.UpdatedAt = now.Format(time.RFC3339) // Format back to string using same format
+			needsUpdate[paginatedWorkerIds[i]] = worker
+		}
+
 		workers = append(workers, worker)
 	}
 
+	// Update workers that need to be marked as inactive in Redis
+	if len(needsUpdate) > 0 {
+		err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate)
+		if err != nil {
+			log.Printf("Error updating inactive workers in Redis: %v\n", err)
+			// Continue to return the workers even if Redis update failed
+		}
+	}
+
 	return workers, totalWorkers, nil
+}
+
+func updateInactiveWorkersInRedis(ctx context.Context, rd *redis.Client, workers map[string]models.WorkersToTrack) error {
+	pipe := rd.Pipeline()
+
+	for id, worker := range workers {
+		workerData, err := json.Marshal(worker)
+		if err != nil {
+			log.Printf("Error marshalling worker %s data: %v\n", id, err)
+			continue
+		}
+		pipe.HSet(ctx, models.WorkerDetailsHash, id, workerData)
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to execute pipeline for inactive workers update: %w", err)
+	}
+
+	return nil
 }

@@ -2,19 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fastsocket/external"
 	"fastsocket/handlers"
 	"fastsocket/models"
 	"fastsocket/util"
 	"flag"
-	"fmt"
-	"github.com/gobwas/ws/wsutil"
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
-	"strings"
-
-	"io"
+	"golang.org/x/sys/unix"
 	"log"
 	"net"
 	"net/http"
@@ -24,215 +19,20 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/gobwas/ws"
-	"golang.org/x/sys/unix"
 )
 
-func startWorkers(n int, ep *models.Epoll, jobChan <-chan models.EventJob, wg *sync.WaitGroup, eventQueue *models.EventQueue) {
-	if n <= 0 {
-		n = runtime.NumCPU() * 2
-	}
-
-	log.Printf("Starting worker pool with %d goroutines", n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go workerFunc(i, ep, jobChan, wg, eventQueue)
-	}
-}
-
-func workerFunc(id int, ep *models.Epoll, jobChan <-chan models.EventJob, wg *sync.WaitGroup, eventQueue *models.EventQueue) {
-	defer wg.Done()
-	for {
-		select {
-		case job, ok := <-jobChan:
-			if !ok {
-				log.Printf("Worker %d stopping: Job channel closed.", id)
-				return // Channel closed, time to exit
-			}
-			ep.HandleEvents(job.Fd, job.Events)
-		case <-ep.ShutdownCtx.Done():
-			log.Printf("Worker %d stopping: Shutdown signal received.", id)
-			return
-
-		default:
-			if job, ok := eventQueue.Dequeue(); ok {
-				ep.HandleEvents(job.Fd, job.Events)
-			} else {
-				// Small sleep to prevent busy-waiting
-				time.Sleep(20 * time.Millisecond)
-			}
-		}
-	}
-}
-
-func wsHander(w http.ResponseWriter, r *http.Request, ep *models.Epoll) {
-	log.Printf("hello htere")
-	conn, _, _, err := ws.UpgradeHTTP(r, w)
-	if err != nil {
-		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
-			log.Printf("ERROR: WebSocket upgrade failed: Too many open files (EMFILE/ENFILE). Check RLIMIT_NOFILE. %v", err)
-			http.Error(w, "Server at connection limit", http.StatusServiceUnavailable)
-		} else if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "connection reset by peer") {
-			log.Printf("INFO: WebSocket upgrade failed, client likely disconnected prematurely: %v", err)
-		} else {
-			log.Printf("ERROR: WebSocket upgrade failed: %v", err)
-			http.Error(w, "Failed to upgrade connection", http.StatusInternalServerError)
-		}
-		ep.Metrics.UpgradesFailed.Add(1)
-		return
-	}
-	if err := ep.Add(conn); err != nil {
-		log.Printf("ERROR: Failed to add WebSocket connection (FD potentially obtained) to epoll: %v", err)
-		ep.Metrics.UpgradesFailed.Add(1)
-		conn.Close()
-		return
-	}
-
-	ep.Metrics.UpgradesSuccess.Add(1)
-	log.Printf("WebSocket connection established and added to epoll.")
-}
-
-type Command struct {
-	CommandType string   `json:"command_type"`
-	DriverId    *string  `json:"driver_id,omitempty"`
-	MinLat      *float64 `json:"min_lat,omitempty"`
-	MinLng      *float64 `json:"min_lng,omitempty"`
-	MaxLat      *float64 `json:"max_lat,omitempty"`
-	MaxLng      *float64 `json:"max_lng,omitempty"`
-	Page        *int     `json:"page,omitempty"`
-}
-
-func controlHandler(w http.ResponseWriter, r *http.Request, notifyMap map[string][]net.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client) {
-	// Upgrade HTTP connection to WebSocket
-	conn, _, _, err := ws.UpgradeHTTP(r, w)
-	if err != nil {
-		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
-			log.Printf("ERROR: WebSocket upgrade failed: Too many open files (EMFILE/ENFILE). Check RLIMIT_NOFILE. %v", err)
-			http.Error(w, "Server at connection limit", http.StatusServiceUnavailable)
-		} else if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "connection reset by peer") {
-			log.Printf("INFO: WebSocket upgrade failed, client likely disconnected prematurely: %v", err)
-		} else {
-			log.Printf("ERROR: WebSocket upgrade failed: %v", err)
-			http.Error(w, "Failed to upgrade connection", http.StatusInternalServerError)
-		}
-
-		return
-	}
-	//defer func() {
-	//	log.Printf("INFO: Closing connection for %s", conn.RemoteAddr())
-	//	conn.Close()
-	//}()
-	log.Println("Control client connected:", conn.RemoteAddr())
-	go func() {
-		for {
-			msg, op, err := wsutil.ReadClientData(conn)
-			if err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-					log.Printf("INFO: Client %s disconnected: %v", conn.RemoteAddr(), err)
-				} else if _, ok := err.(wsutil.ClosedError); ok {
-					log.Printf("INFO: Client %s disconnected (wsutil.ClosedError): %v", conn.RemoteAddr(), err)
-				} else {
-					log.Printf("ERROR: Read error from client %s: %v (OpCode: %v)", conn.RemoteAddr(), err, op)
-				}
-				break
-			}
-
-			// get-drivers-in-bbox // get-drivers // track-driver
-			var decodedMsg Command
-			if err := json.Unmarshal([]byte(msg), &decodedMsg); err != nil {
-				log.Printf("ERROR: Failed to unmarshal JSON from %s: %v. Message: %s", conn.RemoteAddr(), err, string(msg))
-				errMsg := []byte(`{"error": "Invalid JSON format"}`)
-				if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, errMsg); writeErr != nil {
-					log.Printf("ERROR: Failed to send JSON error message to %s: %v", conn.RemoteAddr(), writeErr)
-					break
-				}
-				continue
-			}
-
-			switch decodedMsg.CommandType {
-			case "get-bbox":
-				log.Printf("INFO: Handling 'get-bbox' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
-				if decodedMsg.MinLat == nil || decodedMsg.MinLng == nil || decodedMsg.MaxLat == nil || decodedMsg.MaxLng == nil {
-					continue
-				}
-				log.Printf("INFO: Handling 'get-drivers' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
-				paginated, err := external.FindWorkersInBBox(rd, *decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MinLng)
-				if err != nil {
-					continue
-				}
-				responseBytes, marshalErr := json.Marshal(paginated)
-				if marshalErr != nil {
-					log.Printf("ERROR: Failed to marshal response for %s: %v", conn.RemoteAddr(), marshalErr)
-					continue
-				}
-				if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, responseBytes); writeErr != nil {
-					log.Printf("ERROR: Failed to send driver_id error message to %s: %v", conn.RemoteAddr(), writeErr)
-					break
-				}
-			case "get-drivers":
-				if decodedMsg.Page == nil {
-					continue
-				}
-				log.Printf("INFO: Handling 'get-drivers' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
-				paginated, _, err := external.GetAllWorkersPaginated(rd, *decodedMsg.Page, 100)
-				if err != nil {
-					continue
-				}
-				responseBytes, marshalErr := json.Marshal(paginated)
-				if marshalErr != nil {
-					log.Printf("ERROR: Failed to marshal response for %s: %v", conn.RemoteAddr(), marshalErr)
-					continue
-				}
-				if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, responseBytes); writeErr != nil {
-					log.Printf("ERROR: Failed to send driver_id error message to %s: %v", conn.RemoteAddr(), writeErr)
-					break
-				}
-
-			case "track-driver":
-				log.Printf("INFO: Handling 'track-driver' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
-				if decodedMsg.DriverId == nil || *decodedMsg.DriverId == "" {
-					log.Printf("WARN: 'track-driver' command from %s missing valid driver_id. Message: %s", conn.RemoteAddr(), string(msg))
-					errMsg := []byte(`{"error": "track-driver command requires a valid driver_id"}`)
-					if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, errMsg); writeErr != nil {
-						log.Printf("ERROR: Failed to send driver_id error message to %s: %v", conn.RemoteAddr(), writeErr)
-						break
-					}
-					continue
-				} else {
-					driverID := *decodedMsg.DriverId
-
-					notifyMapMutex.Lock()
-					notifyMap[driverID] = append(notifyMap[driverID], conn)
-					log.Printf("INFO: Client %s is now tracking driver_id: %s. Total trackers for this driver: %d", conn.RemoteAddr(), driverID, len(notifyMap[driverID]))
-					notifyMapMutex.Unlock()
-
-					ackMsg := []byte(fmt.Sprintf(`{"status": "now tracking driver_id %s"}`, driverID))
-					if err = wsutil.WriteServerMessage(conn, ws.OpText, ackMsg); err != nil {
-						log.Printf("ERROR: Failed to send tracking ack to %s: %v", conn.RemoteAddr(), err)
-						break
-					}
-				}
-			default:
-				log.Printf("WARN: Unknown command_type '%s' from %s. Message: %s", decodedMsg.CommandType, conn.RemoteAddr(), string(msg))
-				errMsg := []byte(fmt.Sprintf(`{"error": "Unknown command_type: %s"}`, decodedMsg.CommandType))
-				if writeErr := wsutil.WriteServerMessage(conn, ws.OpText, errMsg); writeErr != nil {
-					log.Printf("ERROR: Failed to send unknown command error message to %s: %v", conn.RemoteAddr(), writeErr)
-					break
-				}
-			}
-
-		}
-	}()
-
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
 func main() {
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
-	// Initialize Metrics
-	serverMetrics := &models.Metrics{StartTime: time.Now()}
+
+	serverMetrics := &models.Metrics{StartTime: time.Now()} // Initialize Metrics
 
 	util.SetupRlimit(false)
 
@@ -246,7 +46,7 @@ func main() {
 	appCtx, cancelApp := context.WithCancel(context.Background())
 	defer cancelApp()
 
-	notifyMap := make(map[string][]net.Conn)
+	notifyMap := make(map[string][]*websocket.Conn)
 	notifyMapMutex := &sync.RWMutex{}
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
@@ -257,6 +57,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}
+
+	//go epollInstance.StartConnectionHealthCheck(context.Background(), 2*time.Second)
 
 	// Ensure epoll FD is closed on shutdown (after wait loop exits)
 	defer func() {
@@ -269,23 +71,23 @@ func main() {
 	// Start Worker Goroutines
 	eventQueue := &models.EventQueue{}
 	workerWg := &sync.WaitGroup{}
-	startWorkers(numWorkers, epollInstance, jobChan, workerWg, eventQueue)
+	util.StartWorkers(numWorkers, epollInstance, jobChan, workerWg, eventQueue)
 
-	// Start Connection Health Checker
-	healthCheckCtx, cancelHealthCheck := context.WithCancel(appCtx) // Inherit from appCtx
-	defer cancelHealthCheck()
-	go epollInstance.StartConnectionHealthCheck(healthCheckCtx, *models.PingInterval)
+	//// Start Connection Health Checker
+	//healthCheckCtx, cancelHealthCheck := context.WithCancel(appCtx) // Inherit from appCtx
+	//defer cancelHealthCheck()
+	//go epollInstance.StartConnectionHealthCheck(healthCheckCtx, *models.PingInterval)
 
 	// Configure HTTP Server for WebSocket endpoint
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		wsHander(w, r, epollInstance)
+		handlers.WsHander(upgrader, w, r, epollInstance)
 	})
 
 	// track
 	// get path
 	mux.HandleFunc("/activity", func(w http.ResponseWriter, r *http.Request) {
-		controlHandler(w, r, notifyMap, notifyMapMutex, rdb)
+		handlers.ControlHandler(upgrader, w, r, notifyMap, notifyMapMutex, rdb)
 	})
 
 	// Configure and Start Metrics Server (on a separate port)
@@ -382,10 +184,9 @@ func main() {
 	log.Println("Server gracefully shut down.")
 }
 
-// get all my drivers paginated
-// functions begin operation
-// funcion end operation
-// roga
-
-// serviceName
-//roga := core.Init(core.Config{ServiceName: "SocketServer"})
+// TODO handle incoming messages efficiently
+// TODO health checker
+// TODO remove disconnected drivers from redis
+// TODO filter out unpdated from redis
+// Todo Redis Cleanup
+// Todo use gorouting pool instead of creating everytime in the epoll

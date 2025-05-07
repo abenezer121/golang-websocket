@@ -3,9 +3,9 @@ package util
 import (
 	"errors"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"golang.org/x/sys/unix"
 	"log"
-	"net"
 	"os"
 	"runtime"
 	"syscall"
@@ -15,12 +15,12 @@ import (
 // The returned file descriptor should be closed when no longer needed,
 // except when obtained via syscall.Conn (where the connection maintains ownership).
 
-func GetFd(conn net.Conn) (int, error) {
+func GetFd(conn *websocket.Conn) (int, error) {
 	// First try the File() method approach for connections that support it
 	type filer interface {
 		File() (*os.File, error)
 	}
-	if fc, ok := conn.(filer); ok {
+	if fc, ok := conn.NetConn().(filer); ok {
 		f, err := fc.File()
 		if err != nil {
 			return -1, fmt.Errorf("failed to get file from connection: %w", err)
@@ -53,7 +53,7 @@ func GetFd(conn net.Conn) (int, error) {
 	}
 
 	// Fall back to syscall.Conn for other connection types
-	sc, ok := conn.(syscall.Conn)
+	sc, ok := conn.NetConn().(syscall.Conn)
 	if !ok {
 		return -1, errors.New("connection does not implement syscall.Conn or filer interface")
 	}
