@@ -35,13 +35,15 @@ type Epoll struct {
 	// roga    core.Roga
 
 	// notify map
-	NotifyMap           map[string][]*websocket.Conn
-	NotifyMapMutex      *sync.RWMutex
-	DriverTrackMap      map[*websocket.Conn]string
+	NotifyMap      map[string][]*websocket.Conn
+	NotifyMapMutex *sync.RWMutex
+
+	// to track drivers
+	DriverTrackMap      map[*websocket.Conn][]string
 	DriverTrackMapMutex *sync.RWMutex
 }
 
-func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m *models.Metrics, rt, wt time.Duration, notifyMap map[string][]*websocket.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client, driverTrackMap map[*websocket.Conn]string, driverTrackMapMutex *sync.RWMutex) (*Epoll, error) {
+func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m *models.Metrics, rt, wt time.Duration, notifyMap map[string][]*websocket.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client, driverTrackMap map[*websocket.Conn][]string, driverTrackMapMutex *sync.RWMutex) (*Epoll, error) {
 	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		return nil, fmt.Errorf("epoll_create1: %w", err)
@@ -66,25 +68,37 @@ func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m 
 	return e, nil
 }
 
-func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error {
-	ctx := context.Background()
+// Todo not to do just warning dont use pipe for the long term location store
+func (ep *Epoll) UpdateWorkersLocation(conn *websocket.Conn, lat, lng float64, at time.Time) error {
 
+	workerId, ok := ep.DriverTrackMap[conn]
+	if !ok {
+		return fmt.Errorf("driver track not found")
+	}
+
+	if len(workerId) < 2 {
+		return fmt.Errorf("driver track id too short")
+	}
+
+	ctx := context.Background()
 	now := time.Now()
 	nowStr := now.Format(time.RFC3339)
 	nowUnixStr := strconv.FormatInt(now.Unix(), 10)
 
 	pipe := ep.redis.Pipeline()
 	ep.NotifyMapMutex.RLock()
-	conns, ok := ep.NotifyMap[workerId]
+	conns, ok := ep.NotifyMap[workerId[0]]
 	ep.NotifyMapMutex.RUnlock()
 
+	// response for tracking
 	if ok {
 		broken := []int{} // collect indexes of dead connections
 		update := models.LocationUpdate{
-			WorkerID:  workerId,
+			WorkerID:  workerId[0],
 			Latitude:  lat,
 			Longitude: lng,
 			Timestamp: nowStr,
+			Session:   workerId[1],
 			UnixTime:  nowUnixStr,
 		}
 
@@ -123,22 +137,23 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 			}
 
 			if len(alive) > 0 {
-				ep.NotifyMap[workerId] = alive
+				ep.NotifyMap[workerId[0]] = alive
 			} else {
-				delete(ep.NotifyMap, workerId)
+				delete(ep.NotifyMap, workerId[0])
 			}
 			ep.NotifyMapMutex.Unlock()
 		}
 	}
+
 	// update workers geo location
 	pipe.GeoAdd(ctx, config.WorkerLocationSet, &redis.GeoLocation{
-		Name:      workerId,
+		Name:      workerId[0],
 		Latitude:  lat,
 		Longitude: lng,
 	})
 
 	var workerToStore models.Command
-	existingData, err := ep.redis.HGet(ctx, config.WorkerDetailsHash, workerId).Result()
+	existingData, err := ep.redis.HGet(ctx, config.WorkerDetailsHash, workerId[0]).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 
 		log.Printf("Error fetching existing worker details for %s: %v\n", workerId, err)
@@ -148,12 +163,12 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 	if errors.Is(err, redis.Nil) {
 		active := true
 		workerToStore = models.Command{
-			Id:        workerId,
-			Lat:       &lat,
-			Lng:       &lng,
-			CreatedAt: &nowStr,
-			UpdatedAt: &nowStr,
-			Active:    &active,
+			DriverId: &workerId[0],
+			Lat:      &lat,
+			Lng:      &lng,
+			At:       &at,
+			Active:   &active,
+			Session:  &workerId[1],
 		}
 	} else {
 		var existingWorker models.Command
@@ -161,21 +176,21 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 			log.Printf("Error unmarshalling existing worker data for %s: %v\n", workerId, err)
 			active := true
 			workerToStore = models.Command{
-				Id:        workerId,
-				Lat:       &lat,
-				Lng:       &lng,
-				CreatedAt: &nowStr,
-				UpdatedAt: &nowStr,
-				Active:    &active,
+				DriverId: &workerId[0],
+				Lat:      &lat,
+				Lng:      &lng,
+				At:       &at,
+				Active:   &active,
+				Session:  &workerId[1],
 			}
 		} else {
 			active := true
 			workerToStore = existingWorker
 			workerToStore.Lat = &lat
 			workerToStore.Lng = &lng
-			workerToStore.UpdatedAt = &nowStr
+			workerToStore.At = &at
 			workerToStore.Active = &active
-
+			workerToStore.Session = &workerId[1]
 		}
 	}
 
@@ -186,11 +201,12 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 		return fmt.Errorf("failed to marshal worker details: %w", err)
 	}
 
-	pipe.HSet(ctx, config.WorkerDetailsHash, workerId, string(workerJSON))
-
+	pipe.HSet(ctx, config.WorkerDetailsHash, workerId[0], string(workerJSON))
+	pipe.Expire(ctx, config.WorkerDetailsHash, 5*time.Second)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		log.Printf("Error executing Redis pipeline for UpdateWorkersLocation (Worker: %s): %v\n", workerId, err)
+		fmt.Println(err)
 		return fmt.Errorf("redis pipeline execution failed: %w", err)
 	}
 	return err
@@ -429,10 +445,20 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 			}
 
 			fmt.Printf("Received worker data from FD %d (%s): %+v\n", fd, conn.RemoteAddr(), worker)
-			if worker.CommandType != nil {
+
+			if worker.CommandType != nil && *worker.CommandType == "driver-register" { // register driver for tracking
+				if worker.DriverId == nil || worker.Session == nil {
+					return
+				}
+
+				ep.DriverTrackMapMutex.Lock()
+				ep.DriverTrackMap[conn] = []string{*worker.DriverId, *worker.Session}
+				ep.DriverTrackMapMutex.Unlock()
+			} else if worker.CommandType != nil {
 				ep.HandleWatcherMessage(worker, conn)
 			} else {
-				err = ep.UpdateWorkersLocation(worker.Id, *worker.Lat, *worker.Lng)
+
+				err = ep.UpdateWorkersLocation(conn, *worker.Lat, *worker.Lng, *worker.At)
 			}
 		case websocket.CloseMessage:
 

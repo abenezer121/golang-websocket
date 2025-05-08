@@ -54,7 +54,6 @@ func main() {
 	u := url.URL{Scheme: "ws", Host: *ip + ":8082", Path: "/ws"}
 	log.Printf("Connecting to %s", u.String())
 
-	// Create single connection
 	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
@@ -86,20 +85,45 @@ func main() {
 		}
 	}()
 
+	// register the driver first
+
+	registerMessage := struct {
+		Id          string `json:"driver_id"`
+		CommandType string `json:"command_type"`
+		Session     string `json:"session"`
+	}{
+		Id:          *id,
+		CommandType: "driver-register",
+		Session:     "468323",
+	}
+
+	jsonMsg, err := json.Marshal(registerMessage)
+	if err != nil {
+		log.Printf("Failed to marshal message: %v", err)
+
+	}
+
+	if err := state.conn.WriteMessage(websocket.TextMessage, jsonMsg); err != nil {
+		log.Printf("Failed to send message: %v", err)
+		return
+	} else {
+		log.Printf("Sent: %s", jsonMsg)
+	}
+
 	startLat, startLng := *lat, *lng
-	endLat, endLng := 9.5124, 39.2288 // Example destination coordinates
+	endLat, endLng := 9.5124, 39.2288
 	totalSteps := 100
 
 	for {
 		log.Printf("Sending message (step %d)", state.currentStep)
 		msg := struct {
-			Id  string  `json:"id"`
-			Lat float64 `json:"lat"`
-			Lng float64 `json:"lng"`
+			Lat float64   `json:"lat"`
+			Lng float64   `json:"lng"`
+			At  time.Time `json:"at"`
 		}{
-			Id:  *id,
 			Lat: startLat + (endLat-startLat)*float64(state.currentStep)/float64(totalSteps),
 			Lng: startLng + (endLng-startLng)*float64(state.currentStep)/float64(totalSteps),
+			At:  time.Now(),
 		}
 
 		// Increment step and reset if needed

@@ -11,7 +11,7 @@ const (
 )
 
 type Command struct {
-	Id          string          `json:"id,omitempty"`
+	//Id          string          `json:"id,omitempty"`
 	CommandType *string         `json:"command_type,omitempty"`
 	DriverId    *string         `json:"driver_id,omitempty"`
 	MinLat      *float64        `json:"min_lat,omitempty"`
@@ -24,8 +24,6 @@ type Command struct {
 	Lng         *float64        `json:"lng"`
 	From        *string         `json:"from"`
 	Session     *string         `json:"session"`
-	CreatedAt   *string         `json:"created_at"`
-	UpdatedAt   *string         `json:"updated_at"`
-	LastSeen    *time.Time      `json:"last_seen"`
+	At          *time.Time      `json:"at"`
 	Active      *bool           `json:"active"`
 }

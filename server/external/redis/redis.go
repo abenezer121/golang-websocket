@@ -10,7 +10,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"log"
 	"sort"
-	"time"
 )
 
 func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64) ([]models.Command, error) {
@@ -137,9 +136,6 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Comm
 	}
 
 	workers := make([]models.Command, 0, len(paginatedWorkerIds))
-	now := time.Now()
-	oneMinuteAgo := now.Add(-1 * time.Minute)
-	needsUpdate := make(map[string]models.Command)
 
 	for i, data := range detailsData {
 		if data == nil {
@@ -159,52 +155,8 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Comm
 			continue
 		}
 
-		// Parse the UpdatedAt string into a time.Time object
-		updatedAt, err := time.Parse(time.RFC3339, *worker.UpdatedAt) // Adjust layout based on your actual format
-		if err != nil {
-			log.Printf("Error parsing UpdatedAt for worker %s: %v\n", paginatedWorkerIds[i], err)
-			continue
-		}
-
-		// Check if the worker was updated more than 1 minute ago and is still marked as active
-		active := false
-		_updatedAt := fmt.Sprintf("%s", now.Format(time.RFC3339))
-		if updatedAt.Before(oneMinuteAgo) && *worker.Active {
-			worker.Active = &active
-			worker.UpdatedAt = &_updatedAt
-			needsUpdate[paginatedWorkerIds[i]] = worker
-		}
-
 		workers = append(workers, worker)
 	}
 
-	if len(needsUpdate) > 0 {
-		err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate)
-		if err != nil {
-			log.Printf("Error updating inactive workers in Redis: %v\n", err)
-
-		}
-	}
-
 	return workers, totalWorkers, nil
-}
-
-func updateInactiveWorkersInRedis(ctx context.Context, rd *redis.Client, workers map[string]models.Command) error {
-	pipe := rd.Pipeline()
-
-	for id, worker := range workers {
-		workerData, err := json.Marshal(worker)
-		if err != nil {
-			log.Printf("Error marshalling worker %s data: %v\n", id, err)
-			continue
-		}
-		pipe.HSet(ctx, config.WorkerDetailsHash, id, workerData)
-	}
-
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to execute pipeline for inactive workers update: %w", err)
-	}
-
-	return nil
 }

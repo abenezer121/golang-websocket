@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fastsocket/config"
 	"fastsocket/epoll"
 	"fastsocket/handlers"
 	"fastsocket/models"
 	"fastsocket/util"
 	"flag"
+	"fmt"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sys/unix"
@@ -48,13 +51,58 @@ func main() {
 	defer cancelApp()
 
 	notifyMap := make(map[string][]*websocket.Conn)
-	driverTrackMap := make(map[*websocket.Conn]string)
+	driverTrackMap := make(map[*websocket.Conn][]string)
 	driverTrackMapMutex := &sync.RWMutex{}
 	notifyMapMutex := &sync.RWMutex{}
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
 	})
+	// Subscribe to keyspace events for expired keys
+	pubsub := rdb.PSubscribe(context.Background(), "__keyevent@0__:expired")
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+
+	go func() {
+		for msg := range ch {
+			log.Printf("Expired key received: %s\n", msg.Payload)
+			if msg.Payload == config.WorkerDetailsHash {
+
+				existingData, err := rdb.HGet(context.Background(), config.WorkerDetailsHash, msg.Payload).Result()
+				if err == nil {
+					continue
+				}
+
+				var existingWorker models.Command
+				if err := json.Unmarshal([]byte(existingData), &existingWorker); err != nil {
+					continue
+				}
+				// make the driver inactive
+				activeDriver := false
+				workerToStore := existingWorker
+				existingWorker.Active = &activeDriver
+
+				workerJSON, err := json.Marshal(workerToStore)
+				if err != nil {
+					log.Printf("Error marshalling worker details for %s: %v\n", msg.Payload, err)
+					continue
+				}
+				fmt.Println(workerJSON)
+				//rdb.HSet(context.Background(), config.WorkerDetailsHash, msg.Payload, string(workerJSON))
+
+			}
+		}
+	}()
+
+	// Add error handling for subscription
+	go func() {
+		for err := range pubsub.Channel() {
+			if err != nil {
+				log.Printf("Subscription error: %v\n", err)
+			}
+		}
+	}()
 
 	epollInstance, err := epoll.NewEpoll(jobChan, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb, driverTrackMap, driverTrackMapMutex)
 	if err != nil {
