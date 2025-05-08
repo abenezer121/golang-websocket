@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -66,6 +67,61 @@ func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m 
 	e.ShutdownWg.Add(1)
 	go e.Wait()
 	return e, nil
+}
+
+func (ep *Epoll) TrackWorkerHistory(driverId, session string, lat, lng float64, at time.Time) error {
+	baseKey := config.WorkerHistorySet + driverId + ":" + session
+	timestamp := at.UnixMilli()
+
+	ctx := context.Background()
+	exists, err := ep.redis.Exists(ctx, baseKey+":loc").Result()
+	if err != nil {
+		return fmt.Errorf("failed to check key existence: %w", err)
+	}
+
+	if exists < 1 {
+		_, err := ep.redis.Do(ctx, "TS.CREATE", baseKey+":loc").Result()
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("failed to create latitude time series: %w", err)
+		}
+
+	}
+
+	_, err = ep.redis.Do(ctx,
+		"TS.MADD",
+		baseKey+":loc", timestamp, util.PackCoordinates(lat, lng),
+	).Result()
+
+	if err != nil {
+		log.Printf("Error storing location history for worker %s session %s: %v\n", driverId, session, err)
+		return fmt.Errorf("failed to store location history: %w", err)
+	}
+
+	length, err := ep.redis.Do(ctx, "TS.INFO", baseKey+":loc").Result()
+	if err != nil {
+		return fmt.Errorf("failed to get time series info: %w", err)
+	}
+
+	info, ok := length.(map[interface{}]interface{})
+	if !ok {
+		return fmt.Errorf("unexpected TS.INFO response format")
+	}
+
+	var totalSamples int64
+	for k, v := range info {
+		if key, ok := k.(string); ok && key == "totalSamples" {
+			if samples, ok := v.(int64); ok {
+				totalSamples = samples
+			}
+		}
+	}
+
+	// we have cron job that checks this every n minute but this is to prevent memory exhaustion
+	if totalSamples == 100 {
+		// push to the user and store the data for safety
+	}
+
+	return nil
 }
 
 // Todo not to do just warning dont use pipe for the long term location store
@@ -151,6 +207,12 @@ func (ep *Epoll) UpdateWorkersLocation(conn *websocket.Conn, lat, lng float64, a
 		Latitude:  lat,
 		Longitude: lng,
 	})
+
+	// on the history
+	err := ep.TrackWorkerHistory(workerId[0], workerId[1], lat, lng, at)
+	if err != nil {
+		return err
+	}
 
 	var workerToStore models.Command
 	existingData, err := ep.redis.HGet(ctx, config.WorkerDetailsHash, workerId[0]).Result()
