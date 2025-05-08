@@ -9,6 +9,6 @@ type LocationUpdate struct {
 }
 type SocketResponse struct {
 	Command    string
-	Paginated  []WorkersToTrack
+	Paginated  []Command
 	DriverData LocationUpdate
 }

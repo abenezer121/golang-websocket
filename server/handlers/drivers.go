@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"errors"
-	"fastsocket/models"
+	"fastsocket/epoll"
 	"github.com/gorilla/websocket"
 	"io"
 	"log"
@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-func WsHander(upgrader websocket.Upgrader, w http.ResponseWriter, r *http.Request, ep *models.Epoll) {
+func WsHander(upgrader websocket.Upgrader, w http.ResponseWriter, r *http.Request, ep *epoll.Epoll) {
 	log.Printf("hello htere")
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

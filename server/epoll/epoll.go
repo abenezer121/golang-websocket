@@ -1,9 +1,12 @@
-package models
+package epoll
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fastsocket/config"
+	redis2 "fastsocket/external/redis"
+	"fastsocket/models"
 	"fastsocket/util"
 	"fmt"
 	"github.com/gorilla/websocket"
@@ -18,23 +21,15 @@ import (
 	"time"
 )
 
-const (
-	WorkerLocationSet  = "workers:locations" // Geo set for worker locations
-	WorkerDetailsHash  = "workers:details"   // Hash storing worker details
-	WorkerActivityHash = "workers:activity"  // Hash storing last activity timestamps
-	WorkerActiveSet    = "workers:active"    // Set of active worker IDs
-	ActivityTimeout    = 5 * time.Minute     // Time after which worker is considered inactive
-)
-
 type Epoll struct {
 	Fd           int
 	Connections  sync.Map
-	Metrics      *Metrics
+	Metrics      *models.Metrics
 	redis        *redis.Client
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 
-	WorkerChan  chan<- EventJob
+	WorkerChan  chan<- models.EventJob
 	ShutdownCtx context.Context
 	ShutdownWg  sync.WaitGroup // to wait for the epoll loop
 	// roga    core.Roga
@@ -42,9 +37,13 @@ type Epoll struct {
 	// notify map
 	NotifyMap      map[string][]*websocket.Conn
 	NotifyMapMutex *sync.RWMutex
+
+	//
+	DriverTrackMap      map[*websocket.Conn]string
+	DriverTrackMapMutex *sync.RWMutex
 }
 
-func NewEpoll(workerChan chan<- EventJob, shutdownCtx context.Context, m *Metrics, rt, wt time.Duration, notifyMap map[string][]*websocket.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client) (*Epoll, error) {
+func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m *models.Metrics, rt, wt time.Duration, notifyMap map[string][]*websocket.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client, driverTrackMap map[*websocket.Conn]string, driverTrackMapMutex *sync.RWMutex) (*Epoll, error) {
 	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		return nil, fmt.Errorf("epoll_create1: %w", err)
@@ -52,15 +51,17 @@ func NewEpoll(workerChan chan<- EventJob, shutdownCtx context.Context, m *Metric
 
 	log.Printf("Created epoll instance with fd: %d", fd)
 	e := &Epoll{
-		Fd:             fd,
-		Metrics:        m,
-		WorkerChan:     workerChan,
-		ShutdownCtx:    shutdownCtx,
-		ReadTimeout:    rt,
-		WriteTimeout:   wt,
-		redis:          rd,
-		NotifyMap:      notifyMap,
-		NotifyMapMutex: notifyMapMutex,
+		Fd:                  fd,
+		Metrics:             m,
+		WorkerChan:          workerChan,
+		ShutdownCtx:         shutdownCtx,
+		ReadTimeout:         rt,
+		WriteTimeout:        wt,
+		redis:               rd,
+		NotifyMap:           notifyMap,
+		NotifyMapMutex:      notifyMapMutex,
+		DriverTrackMap:      driverTrackMap,
+		DriverTrackMapMutex: driverTrackMapMutex,
 	}
 	e.ShutdownWg.Add(1)
 	go e.Wait()
@@ -81,7 +82,7 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 
 	if ok {
 		broken := []int{} // collect indexes of dead connections
-		update := LocationUpdate{
+		update := models.LocationUpdate{
 			WorkerID:  workerId,
 			Latitude:  lat,
 			Longitude: lng,
@@ -89,7 +90,7 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 			UnixTime:  nowUnixStr,
 		}
 
-		response := SocketResponse{
+		response := models.SocketResponse{
 			Command:    "track",
 			DriverData: update,
 		}
@@ -132,14 +133,14 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 		}
 	}
 	// update workers geo location
-	pipe.GeoAdd(ctx, WorkerLocationSet, &redis.GeoLocation{
+	pipe.GeoAdd(ctx, config.WorkerLocationSet, &redis.GeoLocation{
 		Name:      workerId,
 		Latitude:  lat,
 		Longitude: lng,
 	})
 
-	var workerToStore WorkersToTrack
-	existingData, err := ep.redis.HGet(ctx, WorkerDetailsHash, workerId).Result()
+	var workerToStore models.Command
+	existingData, err := ep.redis.HGet(ctx, config.WorkerDetailsHash, workerId).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 
 		log.Printf("Error fetching existing worker details for %s: %v\n", workerId, err)
@@ -147,35 +148,35 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 	}
 
 	if errors.Is(err, redis.Nil) {
-		workerToStore = WorkersToTrack{
+		active := true
+		workerToStore = models.Command{
 			Id:        workerId,
-			Lat:       lat,
-			Lng:       lng,
-			CreatedAt: nowStr,
-			UpdatedAt: nowStr,
-
-			Active: true,
+			Lat:       &lat,
+			Lng:       &lng,
+			CreatedAt: &nowStr,
+			UpdatedAt: &nowStr,
+			Active:    &active,
 		}
 	} else {
-		var existingWorker WorkersToTrack
+		var existingWorker models.Command
 		if err := json.Unmarshal([]byte(existingData), &existingWorker); err != nil {
 			log.Printf("Error unmarshalling existing worker data for %s: %v\n", workerId, err)
-
-			workerToStore = WorkersToTrack{
+			active := true
+			workerToStore = models.Command{
 				Id:        workerId,
-				Lat:       lat,
-				Lng:       lng,
-				CreatedAt: nowStr,
-				UpdatedAt: nowStr,
-				Active:    true,
+				Lat:       &lat,
+				Lng:       &lng,
+				CreatedAt: &nowStr,
+				UpdatedAt: &nowStr,
+				Active:    &active,
 			}
 		} else {
-
+			active := true
 			workerToStore = existingWorker
-			workerToStore.Lat = lat
-			workerToStore.Lng = lng
-			workerToStore.UpdatedAt = nowStr
-			workerToStore.Active = true
+			workerToStore.Lat = &lat
+			workerToStore.Lng = &lng
+			workerToStore.UpdatedAt = &nowStr
+			workerToStore.Active = &active
 
 		}
 	}
@@ -187,9 +188,7 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 		return fmt.Errorf("failed to marshal worker details: %w", err)
 	}
 
-	pipe.HSet(ctx, WorkerDetailsHash, workerId, string(workerJSON))
-	pipe.HSet(ctx, WorkerActivityHash, workerId, nowUnixStr)
-	pipe.SAdd(ctx, WorkerActiveSet, workerId)
+	pipe.HSet(ctx, config.WorkerDetailsHash, workerId, string(workerJSON))
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {
@@ -198,116 +197,6 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 	}
 	return err
 
-}
-
-func (ep *Epoll) CheckAndUpdateWorkerStatus() error {
-	ctx := context.Background()
-	now := time.Now()
-	cutoff := now.Add(-ActivityTimeout).Unix()
-
-	// Get all workers
-	activeWorkerIds, err := ep.redis.SMembers(ctx, WorkerActiveSet).Result()
-	if err != nil {
-		log.Printf("Error fetching active workers from %s: %v\n", WorkerActiveSet, err)
-		return fmt.Errorf("failed to get active workers: %w", err)
-	}
-	if len(activeWorkerIds) == 0 {
-		return nil
-	}
-
-	// Fetch last activity timestamps for all potentially active workers
-	activityTimestamps, err := ep.redis.HMGet(ctx, WorkerActivityHash, activeWorkerIds...).Result()
-	if err != nil {
-		log.Printf("Error fetching activity timestamps from %s: %v\n", WorkerActivityHash, err)
-		return fmt.Errorf("failed to get activity timestamps: %w", err)
-	}
-
-	pipe := ep.redis.Pipeline()
-	inactiveWorkerIds := []string{}
-	workersToUpdateDetails := make(map[string]string) // workerId -> updated JSON
-
-	for i, workerId := range activeWorkerIds {
-		if i >= len(activityTimestamps) || activityTimestamps[i] == nil {
-			// Missing activity timestamp, maybe an inconsistency? Mark inactive for safety.
-			log.Printf("Worker %s found in active set but missing activity timestamp. Marking inactive.\n", workerId)
-			inactiveWorkerIds = append(inactiveWorkerIds, workerId)
-			continue // Skip fetching details for this one initially, handle removal below
-		}
-
-		lastSeenStr, ok := activityTimestamps[i].(string)
-		if !ok {
-			log.Printf("Unexpected type for activity timestamp for worker %s: %T. Marking inactive.\n", workerId, activityTimestamps[i])
-			inactiveWorkerIds = append(inactiveWorkerIds, workerId)
-			continue
-		}
-
-		lastSeen, err := strconv.ParseInt(lastSeenStr, 10, 64)
-		if err != nil {
-			log.Printf("Error parsing activity timestamp '%s' for worker %s: %v. Marking inactive.\n", lastSeenStr, workerId, err)
-			inactiveWorkerIds = append(inactiveWorkerIds, workerId)
-			continue
-		}
-
-		// Check if inactive
-		if lastSeen < cutoff {
-			log.Printf("Worker %s timed out (last seen: %d, cutoff: %d). Marking inactive.\n", workerId, lastSeen, cutoff)
-			inactiveWorkerIds = append(inactiveWorkerIds, workerId)
-		}
-	}
-
-	if len(inactiveWorkerIds) == 0 {
-		return nil // No workers became inactive
-	}
-	if len(inactiveWorkerIds) > 0 {
-		detailsData, err := ep.redis.HMGet(ctx, WorkerDetailsHash, inactiveWorkerIds...).Result()
-		if err != nil {
-			log.Printf("Error fetching details for inactive workers from %s: %v\n", WorkerDetailsHash, err)
-			// Continue to remove from active set, but details won't be updated
-		} else {
-			for i, workerId := range inactiveWorkerIds {
-				if i < len(detailsData) && detailsData[i] != nil {
-					detailStr, ok := detailsData[i].(string)
-					if !ok {
-						log.Printf("Unexpected type for worker detail for worker %s: %T. Skipping detail update.\n", workerId, detailsData[i])
-						continue
-					}
-
-					var worker WorkersToTrack
-					if err := json.Unmarshal([]byte(detailStr), &worker); err == nil {
-						if worker.Active { // Only update if it's currently marked active
-							worker.Active = false
-							worker.UpdatedAt = now.Format(time.RFC3339) // Optionally update UpdatedAt
-							if workerJSON, err := json.Marshal(worker); err == nil {
-								// Prepare HSet command for the pipeline
-								workersToUpdateDetails[workerId] = string(workerJSON)
-							} else {
-								log.Printf("Error marshalling updated inactive worker %s: %v\n", workerId, err)
-							}
-						}
-					} else {
-						log.Printf("Error unmarshalling worker details for inactive worker %s: %v\n", workerId, err)
-					}
-				} else {
-					log.Printf("Details not found for inactive worker %s in %s\n", workerId, WorkerDetailsHash)
-				}
-			}
-		}
-
-		if len(inactiveWorkerIds) > 0 {
-			pipe.SRem(ctx, WorkerActiveSet, inactiveWorkerIds)
-		}
-
-		if len(workersToUpdateDetails) > 0 {
-			pipe.HSet(ctx, WorkerDetailsHash, workersToUpdateDetails)
-		}
-
-	}
-	_, err = pipe.Exec(ctx)
-	if err != nil {
-		log.Printf("Error executing Redis pipeline for CheckAndUpdateWorkerStatus: %v\n", err)
-		return fmt.Errorf("redis pipeline execution failed for status update: %w", err)
-	}
-	return err
 }
 
 func (ep *Epoll) Add(conn *websocket.Conn) error {
@@ -332,12 +221,7 @@ func (ep *Epoll) Add(conn *websocket.Conn) error {
 		Fd:     int32(fd),
 	})
 	if err != nil {
-		//e.roga.LogInfo(core.LogArgs{
-		//
-		//	Message: "hello",
-		//	//Actor          Actor           `json:"actor"`
-		//
-		//})
+
 		log.Printf("ERROR: Failed to add FD %d to epoll: %v", fd, err)
 		return fmt.Errorf("epoll_ctl add failed: %w", err)
 
@@ -418,7 +302,7 @@ func (ep *Epoll) Wait() {
 		default:
 		}
 
-		n, err := unix.EpollWait(ep.Fd, events, EpollWaitTimeout)
+		n, err := unix.EpollWait(ep.Fd, events, models.EpollWaitTimeout)
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
 				continue
@@ -537,7 +421,7 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 
 		switch msgType {
 		case websocket.TextMessage, websocket.BinaryMessage:
-			var worker WorkersToTrack
+			var worker models.Command
 			jsonErr := json.Unmarshal(msg, &worker)
 			if jsonErr != nil {
 				log.Printf("ERROR: Failed to unmarshal message on FD %d (%s): %v. Content: %s. Closing.", fd, conn.RemoteAddr(), jsonErr, string(msg))
@@ -547,9 +431,11 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 			}
 
 			fmt.Printf("Received worker data from FD %d (%s): %+v\n", fd, conn.RemoteAddr(), worker)
-			err = ep.UpdateWorkersLocation(worker.Id, worker.Lat, worker.Lng)
-			// If this processing is slow, it blocks the entire Epoll.Wait loop.
-
+			if worker.CommandType != nil {
+				ep.HandleWatcherMessage(worker, conn)
+			} else {
+				err = ep.UpdateWorkersLocation(worker.Id, *worker.Lat, *worker.Lng)
+			}
 		case websocket.CloseMessage:
 
 			log.Printf("INFO: Received WebSocket Close frame from FD %d (%s). Closing connection.", fd, conn.RemoteAddr())
@@ -580,4 +466,152 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 		}
 
 	}
+}
+
+func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket.Conn) {
+
+	//defer func() {
+	//	log.Printf("INFO: Closing connection for %s", conn.RemoteAddr())
+	//	// Clean up this connection from the notifyMap if it was tracking a driver.
+	//	if trackedDriverID != "" {
+	//		notifyMapMutex.Lock()
+	//		if conns, ok := notifyMap[trackedDriverID]; ok {
+	//			// Remove the current connection (conn) from the slice of connections for the trackedDriverID
+	//			updatedConns := []*websocket.Conn{}
+	//			for _, c := range conns {
+	//				if c != conn {
+	//					updatedConns = append(updatedConns, c)
+	//				}
+	//			}
+	//			if len(updatedConns) == 0 {
+	//				delete(notifyMap, trackedDriverID) // No more trackers for this driver
+	//				log.Printf("INFO: Removed last tracker for driver_id: %s (client: %s)", trackedDriverID, conn.RemoteAddr())
+	//			} else {
+	//				notifyMap[trackedDriverID] = updatedConns
+	//				log.Printf("INFO: Removed client %s from tracking driver_id: %s. Remaining trackers: %d", conn.RemoteAddr(), trackedDriverID, len(updatedConns))
+	//			}
+	//		}
+	//		notifyMapMutex.Unlock()
+	//	}
+	//	conn.Close() // Close the WebSocket connection.
+	//}()
+
+	// This is the message read loop for the successfully established WebSocket connection.
+
+	// We only process text messages.
+
+	// Attempt to unmarshal the JSON message into our Command struct.
+
+	// Handle commands based on CommandType.
+	switch *decodedMsg.CommandType {
+	case "get-bbox":
+		log.Printf("INFO: Handling 'get-bbox' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
+		// Validate required fields for get-bbox.
+		if decodedMsg.MinLat == nil || decodedMsg.MinLng == nil || decodedMsg.MaxLat == nil || decodedMsg.MaxLng == nil {
+			log.Printf("WARN: 'get-bbox' command from %s missing required coordinates. Message: %s", conn.RemoteAddr(), decodedMsg)
+			errMsg := []byte(`{"error": "get-bbox command requires min_lat, min_lng, max_lat, max_lng"}`)
+			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+				log.Printf("ERROR: Failed to send coordinate error message to %s: %v", conn.RemoteAddr(), writeErr)
+				break
+			}
+			return
+		}
+
+		// Call your external function to find workers in the bounding box.
+		paginated, err := redis2.FindWorkersInBBox(ep.redis, *decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
+		if err != nil {
+			log.Printf("ERROR: 'get-bbox' failed to find workers for %s: %v", conn.RemoteAddr(), err)
+			errMsg := []byte(`{"error": "Failed to retrieve data for bounding box"}`)
+			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+				log.Printf("ERROR: Failed to send bbox data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
+				break
+			}
+			return
+		}
+
+		// Prepare and send the response.
+		newSocketResponse := models.SocketResponse{Command: "get-bbox", Paginated: paginated}
+		responseBytes, marshalErr := json.Marshal(newSocketResponse)
+		if marshalErr != nil {
+			log.Printf("ERROR: Failed to marshal 'get-bbox' response for %s: %v", conn.RemoteAddr(), marshalErr)
+			//Todo Or send an internal server error message
+			return
+		}
+		if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
+			log.Printf("ERROR: Failed to send 'get-bbox' response to %s: %v", conn.RemoteAddr(), writeErr)
+			break
+		}
+
+	case "get-drivers":
+		log.Printf("INFO: Handling 'get-drivers' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
+		// Validate required fields for get-drivers.
+		if decodedMsg.Page == nil {
+			log.Printf("WARN: 'get-drivers' command from %s missing page number. Message: %s", conn.RemoteAddr(), decodedMsg)
+			errMsg := []byte(`{"error": "get-drivers command requires a page number"}`)
+			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+				log.Printf("ERROR: Failed to send page number error message to %s: %v", conn.RemoteAddr(), writeErr)
+				break
+			}
+			return
+		}
+
+		// Call your external function to get all workers paginated.
+		paginated, _, err := redis2.GetAllWorkersPaginated(ep.redis, *decodedMsg.Page, 100) // Assuming page size of 100
+		if err != nil {
+			log.Printf("ERROR: 'get-drivers' failed to get all workers for %s: %v", conn.RemoteAddr(), err)
+			errMsg := []byte(`{"error": "Failed to retrieve drivers list"}`)
+			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+				log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
+				break
+			}
+			return
+		}
+
+		// Prepare and send the response.
+		newSocketResponse := models.SocketResponse{Command: "get-drivers", Paginated: paginated}
+		responseBytes, marshalErr := json.Marshal(newSocketResponse)
+		if marshalErr != nil {
+			log.Printf("ERROR: Failed to marshal 'get-drivers' response for %s: %v", conn.RemoteAddr(), marshalErr)
+			return
+		}
+		if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
+			log.Printf("ERROR: Failed to send 'get-drivers' response to %s: %v", conn.RemoteAddr(), writeErr)
+			break
+		}
+
+	case "track-driver":
+		log.Printf("INFO: Handling 'track-driver' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
+		// Validate required fields for track-driver.
+		if decodedMsg.DriverId == nil || *decodedMsg.DriverId == "" {
+			log.Printf("WARN: 'track-driver' command from %s missing valid driver_id. Message: %s", conn.RemoteAddr(), decodedMsg)
+			errMsg := []byte(`{"error": "track-driver command requires a valid driver_id"}`)
+			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+				log.Printf("ERROR: Failed to send driver_id validation error message to %s: %v", conn.RemoteAddr(), writeErr)
+				break
+			}
+			return
+		}
+
+		newDriverToTrack := *decodedMsg.DriverId
+		ep.NotifyMapMutex.Lock()
+		// TODO check before pushing
+		ep.NotifyMap[newDriverToTrack] = append(ep.NotifyMap[newDriverToTrack], conn)
+
+		ep.NotifyMapMutex.Unlock()
+		// Send an acknowledgment message.
+		ackMsg := []byte(fmt.Sprintf(`{"status": "now tracking driver_id %s"}`, newDriverToTrack))
+		if err := conn.WriteMessage(websocket.TextMessage, ackMsg); err != nil {
+			log.Printf("ERROR: Failed to send tracking acknowledgment to %s: %v", conn.RemoteAddr(), err)
+			return
+		}
+
+	default:
+		log.Printf("WARN: Unknown command_type '%s' from %s. Message: %s", decodedMsg.CommandType, conn.RemoteAddr(), decodedMsg)
+		errMsg := []byte(fmt.Sprintf(`{"error": "Unknown command_type: %s"}`, decodedMsg.CommandType))
+		if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+			log.Printf("ERROR: Failed to send unknown command error message to %s: %v", conn.RemoteAddr(), writeErr)
+			break
+		}
+	}
+
 }

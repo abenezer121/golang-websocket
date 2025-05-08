@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fastsocket/epoll"
 	"fastsocket/handlers"
 	"fastsocket/models"
 	"fastsocket/util"
@@ -47,13 +48,15 @@ func main() {
 	defer cancelApp()
 
 	notifyMap := make(map[string][]*websocket.Conn)
+	driverTrackMap := make(map[*websocket.Conn]string)
+	driverTrackMapMutex := &sync.RWMutex{}
 	notifyMapMutex := &sync.RWMutex{}
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
 	})
 
-	epollInstance, err := models.NewEpoll(jobChan, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb)
+	epollInstance, err := epoll.NewEpoll(jobChan, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb, driverTrackMap, driverTrackMapMutex)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}
@@ -69,9 +72,9 @@ func main() {
 	}()
 
 	// Start Worker Goroutines
-	eventQueue := &models.EventQueue{}
+	//eventQueue := &models.EventQueue{}
 	workerWg := &sync.WaitGroup{}
-	util.StartWorkers(numWorkers, epollInstance, jobChan, workerWg, eventQueue)
+	//util.StartWorkers(numWorkers, epollInstance, jobChan, workerWg, eventQueue)
 
 	//// Start Connection Health Checker
 	//healthCheckCtx, cancelHealthCheck := context.WithCancel(appCtx) // Inherit from appCtx
@@ -87,7 +90,7 @@ func main() {
 	// track
 	// get path
 	mux.HandleFunc("/activity", func(w http.ResponseWriter, r *http.Request) {
-		handlers.ControlHandler(upgrader, w, r, notifyMap, notifyMapMutex, rdb)
+		handlers.ControlHandler(upgrader, w, r, epollInstance)
 	})
 
 	// Configure and Start Metrics Server (on a separate port)
@@ -184,6 +187,8 @@ func main() {
 	log.Println("Server gracefully shut down.")
 }
 
+// Todo filter out drivers based on user input
+// TODO currently the redis is filtered out when requested
 // TODO handle incoming messages efficiently
 // TODO health checker
 // TODO remove disconnected drivers from redis
