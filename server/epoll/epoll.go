@@ -35,10 +35,8 @@ type Epoll struct {
 	// roga    core.Roga
 
 	// notify map
-	NotifyMap      map[string][]*websocket.Conn
-	NotifyMapMutex *sync.RWMutex
-
-	//
+	NotifyMap           map[string][]*websocket.Conn
+	NotifyMapMutex      *sync.RWMutex
 	DriverTrackMap      map[*websocket.Conn]string
 	DriverTrackMapMutex *sync.RWMutex
 }
