@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fastsocket/config"
 	"fastsocket/epoll"
 	"fastsocket/handlers"
 	"fastsocket/models"
 	"fastsocket/util"
-	"flag"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sys/unix"
@@ -29,8 +29,9 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
-	flag.Parse()
 
+	config.ParseFlags()
+	log.Println("Starting server with response format:", config.ResponseFormat)
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 
 	serverMetrics := &models.Metrics{StartTime: time.Now()} // Initialize Metrics
@@ -45,6 +46,7 @@ func main() {
 	jobChan := make(chan models.EventJob, *models.Workers*4)
 
 	appCtx, cancelApp := context.WithCancel(context.Background())
+
 	defer cancelApp()
 
 	notifyMap := make(map[string][]*websocket.Conn)
@@ -55,52 +57,6 @@ func main() {
 		Addr: "localhost:6379",
 		DB:   0,
 	})
-	// Subscribe to keyspace events for expired keys
-	//pubsub := rdb.PSubscribe(context.Background(), "__keyevent@0__:expired")
-	//defer pubsub.Close()
-	//
-	//ch := pubsub.Channel()
-	//
-	//go func() {
-	//	for msg := range ch {
-	//		log.Printf("Expired key received: %s\n", msg.Payload)
-	//		fmt.Println(msg)
-	//		if msg.Payload == config.WorkerDetailsHash {
-	//
-	//			existingData, err := rdb.HGet(context.Background(), config.WorkerDetailsHash, msg.Payload).Result()
-	//			if err == nil {
-	//				continue
-	//			}
-	//
-	//			var existingWorker models.Command
-	//			if err := json.Unmarshal([]byte(existingData), &existingWorker); err != nil {
-	//				continue
-	//			}
-	//			// make the driver inactive
-	//			activeDriver := false
-	//			workerToStore := existingWorker
-	//			existingWorker.Active = &activeDriver
-	//
-	//			workerJSON, err := json.Marshal(workerToStore)
-	//			if err != nil {
-	//				log.Printf("Error marshalling worker details for %s: %v\n", msg.Payload, err)
-	//				continue
-	//			}
-	//			fmt.Println(workerJSON)
-	//			//rdb.HSet(context.Background(), config.WorkerDetailsHash, msg.Payload, string(workerJSON))
-	//
-	//		}
-	//	}
-	//}()
-	//
-	//// Add error handling for subscription
-	//go func() {
-	//	for err := range pubsub.Channel() {
-	//		if err != nil {
-	//			log.Printf("Subscription error: %v\n", err)
-	//		}
-	//	}
-	//}()
 
 	epollInstance, err := epoll.NewEpoll(jobChan, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb, driverTrackMap, driverTrackMapMutex)
 	if err != nil {

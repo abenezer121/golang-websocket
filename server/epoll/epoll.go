@@ -9,6 +9,7 @@ import (
 	"fastsocket/models"
 	"fastsocket/util"
 	"fmt"
+	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sys/unix"
@@ -611,30 +612,67 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 			}
 			return
 		}
+		if config.ResponseFormat == "proto" {
 
-		// Call your external function to find workers in the bounding box.
-		paginated, err := redis2.FindWorkersInBBox(ep.redis, *decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
-		if err != nil {
-			log.Printf("ERROR: 'get-bbox' failed to find workers for %s: %v", conn.RemoteAddr(), err)
-			errMsg := []byte(`{"error": "Failed to retrieve data for bounding box"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
-				log.Printf("ERROR: Failed to send bbox data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
+			paginated, err := redis2.FindWorkersInBBoxProto(ep.redis, *decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
+			if err != nil {
+				log.Printf("ERROR: 'get-bbox' failed to find workers for %s: %v", conn.RemoteAddr(), err)
+
+				errMsg := models.ErrorMessageProto{
+					Error: "Failed to retrieve data for bounding box",
+				}
+				errResp, err := proto.Marshal(&errMsg)
+				if err != nil {
+					return
+				}
+
+				if writeErr := conn.WriteMessage(websocket.BinaryMessage, errResp); writeErr != nil {
+					log.Printf("ERROR: Failed to send bbox data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
+					break
+				}
+				return
+			}
+			newSocketProtoResponse := models.SocketResponseProto{
+				Command:   "get-bbox",
+				Paginated: paginated,
+			}
+			respBytes, marshalErr := proto.Marshal(&newSocketProtoResponse)
+
+			if marshalErr != nil {
+				log.Printf("ERROR: Failed to marshal 'get-bbox' response for %s: %v", conn.RemoteAddr(), marshalErr)
+				//Todo Or send an internal server error message
+				return
+			}
+			if writeErr := conn.WriteMessage(websocket.BinaryMessage, respBytes); writeErr != nil {
+				log.Printf("ERROR: Failed to send 'get-bbox' response to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
-			return
-		}
+		} else {
 
-		// Prepare and send the response.
-		newSocketResponse := models.SocketResponse{Command: "get-bbox", Paginated: paginated}
-		responseBytes, marshalErr := json.Marshal(newSocketResponse)
-		if marshalErr != nil {
-			log.Printf("ERROR: Failed to marshal 'get-bbox' response for %s: %v", conn.RemoteAddr(), marshalErr)
-			//Todo Or send an internal server error message
-			return
-		}
-		if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
-			log.Printf("ERROR: Failed to send 'get-bbox' response to %s: %v", conn.RemoteAddr(), writeErr)
-			break
+			paginated, err := redis2.FindWorkersInBBox(ep.redis, *decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
+			if err != nil {
+				log.Printf("ERROR: 'get-bbox' failed to find workers for %s: %v", conn.RemoteAddr(), err)
+				errMsg := []byte(`{"error": "Failed to retrieve data for bounding box"}`)
+				if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+					log.Printf("ERROR: Failed to send bbox data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
+					break
+				}
+				return
+			}
+
+			// Prepare and send the response.
+			newSocketResponse := models.SocketResponse{Command: "get-bbox", Paginated: paginated}
+
+			responseBytes, marshalErr := json.Marshal(newSocketResponse)
+			if marshalErr != nil {
+				log.Printf("ERROR: Failed to marshal 'get-bbox' response for %s: %v", conn.RemoteAddr(), marshalErr)
+				//Todo Or send an internal server error message
+				return
+			}
+			if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
+				log.Printf("ERROR: Failed to send 'get-bbox' response to %s: %v", conn.RemoteAddr(), writeErr)
+				break
+			}
 		}
 
 	case "get-drivers":
@@ -650,30 +688,61 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 			return
 		}
 
-		// Call your external function to get all workers paginated.
-		paginated, _, err := redis2.GetAllWorkersPaginated(ep.redis, *decodedMsg.Page, 100) // Assuming page size of 100
-		if err != nil {
-			log.Printf("ERROR: 'get-drivers' failed to get all workers for %s: %v", conn.RemoteAddr(), err)
-			errMsg := []byte(`{"error": "Failed to retrieve drivers list"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
-				log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
+		if config.ResponseFormat == "proto" {
+			paginated, _, err := redis2.GetAllWorkersPaginatedProto(ep.redis, *decodedMsg.Page, 100) // Assuming page size of 100
+			if err != nil {
+				log.Printf("ERROR: 'get-drivers' failed to get all workers for %s: %v", conn.RemoteAddr(), err)
+				errMsg := models.ErrorMessageProto{
+					Error: "Failed to retrieve drivers list",
+				}
+				errResp, err := proto.Marshal(&errMsg)
+				if err != nil {
+					return
+				}
+				if writeErr := conn.WriteMessage(websocket.BinaryMessage, errResp); writeErr != nil {
+					log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
+					break
+				}
+				return
+			}
+
+			newSocketResponse := models.SocketResponseProto{Command: "get-drivers", Paginated: paginated}
+
+			responseBytes, marshalErr := proto.Marshal(&newSocketResponse)
+			if marshalErr != nil {
+				log.Printf("ERROR: Failed to marshal 'get-drivers' response for %s: %v", conn.RemoteAddr(), marshalErr)
+				return
+			}
+			if writeErr := conn.WriteMessage(websocket.BinaryMessage, responseBytes); writeErr != nil {
+				log.Printf("ERROR: Failed to send 'get-drivers' response to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
-			return
-		}
 
-		// Prepare and send the response.
-		newSocketResponse := models.SocketResponse{Command: "get-drivers", Paginated: paginated}
-		responseBytes, marshalErr := json.Marshal(newSocketResponse)
-		if marshalErr != nil {
-			log.Printf("ERROR: Failed to marshal 'get-drivers' response for %s: %v", conn.RemoteAddr(), marshalErr)
-			return
-		}
-		if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
-			log.Printf("ERROR: Failed to send 'get-drivers' response to %s: %v", conn.RemoteAddr(), writeErr)
-			break
-		}
+		} else {
+			paginated, _, err := redis2.GetAllWorkersPaginated(ep.redis, *decodedMsg.Page, 100) // Assuming page size of 100
+			if err != nil {
+				log.Printf("ERROR: 'get-drivers' failed to get all workers for %s: %v", conn.RemoteAddr(), err)
 
+				errMsg := []byte(`{"error": "Failed to retrieve drivers list"}`)
+				if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+					log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
+					break
+				}
+				return
+			}
+			// Prepare and send the response.
+			newSocketResponse := models.SocketResponse{Command: "get-drivers", Paginated: paginated}
+			responseBytes, marshalErr := json.Marshal(newSocketResponse)
+			if marshalErr != nil {
+				log.Printf("ERROR: Failed to marshal 'get-drivers' response for %s: %v", conn.RemoteAddr(), marshalErr)
+				return
+			}
+			if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
+				log.Printf("ERROR: Failed to send 'get-drivers' response to %s: %v", conn.RemoteAddr(), writeErr)
+				break
+
+			}
+		}
 	case "track-driver":
 		log.Printf("INFO: Handling 'track-driver' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
 		// Validate required fields for track-driver.

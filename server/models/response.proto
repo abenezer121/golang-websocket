@@ -1,0 +1,39 @@
+syntax = "proto3";
+option go_package = "fastsocket/models";
+
+import "google/protobuf/timestamp.proto";
+
+message CommandProto {
+  string command_type = 1;
+  string driver_id = 2;
+  double min_lat = 3;
+  double min_lng = 4;
+  double max_lat = 5;
+  double max_lng = 6;
+  int32 page = 7;
+  double lat = 8;
+  double lng = 9;
+  string from = 10;
+  string session = 11;
+  google.protobuf.Timestamp at = 12;
+  bool active = 13;
+}
+
+message LocationUpdateProto {
+  string worker_id = 1;
+  double latitude = 2;
+  double longitude = 3;
+  string timestamp = 4;
+  string session = 5;
+  string unix_time = 6;
+}
+
+message SocketResponseProto {
+  string command = 1;
+  repeated CommandProto paginated = 2;
+  LocationUpdateProto driver_data = 3;
+}
+
+message ErrorMessageProto {
+  string error = 1;
+}
