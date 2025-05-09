@@ -22,6 +22,10 @@ import (
 	"time"
 )
 
+const (
+	PoolSize = 1000
+)
+
 type Epoll struct {
 	Fd           int
 	Connections  sync.Map
@@ -29,10 +33,10 @@ type Epoll struct {
 	redis        *redis.Client
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
-
-	WorkerChan  chan<- models.EventJob
-	ShutdownCtx context.Context
-	ShutdownWg  sync.WaitGroup // to wait for the epoll loop
+	pool         *Pool
+	WorkerChan   chan<- models.EventJob
+	ShutdownCtx  context.Context
+	ShutdownWg   sync.WaitGroup // to wait for the epoll loop
 	// roga    core.Roga
 
 	// notify map
@@ -63,6 +67,7 @@ func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m 
 		NotifyMapMutex:      notifyMapMutex,
 		DriverTrackMap:      driverTrackMap,
 		DriverTrackMapMutex: driverTrackMapMutex,
+		pool:                NewPool(PoolSize),
 	}
 	e.ShutdownWg.Add(1)
 	go e.Wait()
@@ -408,14 +413,18 @@ func (ep *Epoll) Wait() {
 			case <-ep.ShutdownCtx.Done():
 				return
 			default:
+				ep.pool.Schedule(func() {
+					ep.HandleEvents(fd, eventFlags)
+				})
 				// make this go routing pool
-				go func(fd int, flags uint32) {
-					ep.HandleEvents(fd, flags)
-				}(fd, eventFlags)
+				//	go func(fd int, flags uint32) {
+				//		ep.HandleEvents(fd, flags)
+				//	}(fd, eventFlags)
 			}
 		}
 	}
 }
+
 func (ep *Epoll) HandleEvents(fd int, events uint32) {
 
 	connVal, ok := ep.Connections.Load(fd)
@@ -699,5 +708,4 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 			break
 		}
 	}
-
 }

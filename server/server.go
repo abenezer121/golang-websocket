@@ -234,11 +234,8 @@ func main() {
 }
 
 // Todo consistent time conversion
-// Todo filter out drivers based on user input is it our job
-// TODO currently the redis is filtered out when requested
-// TODO handle incoming messages efficiently
 // TODO health checker
-// TODO remove disconnected drivers from redis
-// TODO filter out unpdated from redis
-// Todo Redis Cleanup
-// Todo use gorouting pool instead of creating everytime in the epoll
+// Todo Redis Cleanup for history
+// Todo use goroutine pool instead of creating everytime in the epoll
+// Todo make the clients send ping message every n second and if the client expired dont send them messages
+// Todo prevent self ddos
