@@ -170,11 +170,10 @@ func GetAllWorkersPaginatedProto(rd *redis.Client, page, pageSize int) ([]*model
 	workerProto := make([]*models.CommandProto, 0, len(workers))
 	for _, worker := range workers {
 		workerProto = append(workerProto, &models.CommandProto{
-			DriverId:    *worker.DriverId,
-			Lat:         *worker.Lat,
-			Lng:         *worker.Lng,
-			Session:     *worker.Session,
-			CommandType: *worker.CommandType,
+			DriverId: *worker.DriverId,
+			Lat:      *worker.Lat,
+			Lng:      *worker.Lng,
+			Session:  *worker.Session,
 		})
 	}
 	return workerProto, totalWorkers, nil

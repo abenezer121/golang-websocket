@@ -155,32 +155,63 @@ func (ep *Epoll) UpdateWorkersLocation(conn *websocket.Conn, lat, lng float64, a
 	// response for tracking
 	if ok {
 		broken := []int{} // collect indexes of dead connections
-		update := models.LocationUpdate{
-			WorkerID:  workerId[0],
-			Latitude:  lat,
-			Longitude: lng,
-			Timestamp: nowStr,
-			Session:   workerId[1],
-			UnixTime:  nowUnixStr,
-		}
 
-		response := models.SocketResponse{
-			Command:    "track",
-			DriverData: update,
-		}
+		if config.ResponseFormat == "proto" {
+			update := models.LocationUpdateProto{
+				WorkerId:  workerId[0],
+				Latitude:  lat,
+				Longitude: lng,
+				Timestamp: nowStr,
+				Session:   workerId[1],
+				UnixTime:  nowUnixStr,
+			}
 
-		msg, err := json.Marshal(response)
-		if err != nil {
-			return fmt.Errorf("json marshal error: %w", err)
-		}
+			response := models.SocketResponseProto{
+				Command:    "track",
+				DriverData: &update,
+			}
 
-		for i, conn := range conns {
-			err := conn.WriteMessage(websocket.TextMessage, msg)
+			msg, err := proto.Marshal(&response)
 			if err != nil {
-				log.Printf("Failed to write to connection for worker %s: %v", workerId, err)
-				broken = append(broken, i)
+				return fmt.Errorf("proto marshal error: %w", err)
+			}
+
+			for i, conn := range conns {
+				err := conn.WriteMessage(websocket.BinaryMessage, msg)
+				if err != nil {
+					log.Printf("Failed to write to connection for worker %s: %v", workerId, err)
+					broken = append(broken, i)
+				}
+			}
+		} else {
+			update := models.LocationUpdate{
+				WorkerID:  workerId[0],
+				Latitude:  lat,
+				Longitude: lng,
+				Timestamp: nowStr,
+				Session:   workerId[1],
+				UnixTime:  nowUnixStr,
+			}
+
+			response := models.SocketResponse{
+				Command:    "track",
+				DriverData: update,
+			}
+
+			msg, err := json.Marshal(response)
+			if err != nil {
+				return fmt.Errorf("json marshal error: %w", err)
+			}
+
+			for i, conn := range conns {
+				err := conn.WriteMessage(websocket.TextMessage, msg)
+				if err != nil {
+					log.Printf("Failed to write to connection for worker %s: %v", workerId, err)
+					broken = append(broken, i)
+				}
 			}
 		}
+
 		// clean up broken connections
 		if len(broken) > 0 {
 			ep.NotifyMapMutex.Lock()
@@ -414,13 +445,13 @@ func (ep *Epoll) Wait() {
 			case <-ep.ShutdownCtx.Done():
 				return
 			default:
-				ep.pool.Schedule(func() {
-					ep.HandleEvents(fd, eventFlags)
-				})
+				//ep.pool.Schedule(func() {
+				//	ep.HandleEvents(fd, eventFlags)
+				//})
 				// make this go routing pool
-				//	go func(fd int, flags uint32) {
-				//		ep.HandleEvents(fd, flags)
-				//	}(fd, eventFlags)
+				go func(fd int, flags uint32) {
+					ep.HandleEvents(fd, flags)
+				}(fd, eventFlags)
 			}
 		}
 	}
