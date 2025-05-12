@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"errors"
-	"fastsocket/epoll"
+	"fastsocket/core/epoll"
 	"github.com/gorilla/websocket"
 	"io"
 	"log"

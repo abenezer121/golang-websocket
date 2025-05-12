@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fastsocket/config"
-	"fastsocket/epoll"
-	"fastsocket/handlers"
+	"fastsocket/core/epoll"
+	handlers2 "fastsocket/core/handlers"
 	"fastsocket/models"
 	"fastsocket/util"
 	"github.com/gorilla/websocket"
@@ -86,19 +86,19 @@ func main() {
 	// Configure HTTP Server for WebSocket endpoint
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		handlers.WsHander(upgrader, w, r, epollInstance)
+		handlers2.WsHander(upgrader, w, r, epollInstance)
 	})
 
 	// track
 	// get path
 	mux.HandleFunc("/activity", func(w http.ResponseWriter, r *http.Request) {
-		handlers.ControlHandler(upgrader, w, r, epollInstance)
+		handlers2.ControlHandler(upgrader, w, r, epollInstance)
 	})
 
 	// Configure and Start Metrics Server (on a separate port)
 	if *models.MetricsAddr != "" {
 		metricsMux := http.NewServeMux()
-		metricsMux.Handle("/metrics", handlers.MetricsHandler(serverMetrics))
+		metricsMux.Handle("/metrics", handlers2.MetricsHandler(serverMetrics))
 		metricsSrv := &http.Server{
 			Addr:    *models.MetricsAddr,
 			Handler: metricsMux,
@@ -191,7 +191,8 @@ func main() {
 
 // Todo consistent time conversion
 // TODO health checker
-// Todo Redis Cleanup for history
-// Todo use goroutine pool instead of creating everytime in the epoll
+// Todo Redis Cleanup for history crone job every 10 minute
+// Todo when tracking use driverId + sessionId
+
 // Todo make the clients send ping message every n second and if the client expired dont send them messages
 // Todo prevent self ddos

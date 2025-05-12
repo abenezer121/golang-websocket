@@ -16,7 +16,7 @@ var (
 )
 
 func ParseFlags() {
-	flag.StringVar(&ResponseFormat, "response_format", "json", "Format of API responses (e.g., json or proto)")
+	flag.StringVar(&ResponseFormat, "response_format", "proto", "Format of API responses (e.g., json or proto)")
 	flag.Parse()
 
 	log.Printf("Using response format: %s", ResponseFormat)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fastsocket/config"
+	"fastsocket/core/socket"
 	redis2 "fastsocket/external/redis"
 	"fastsocket/models"
 	"fastsocket/util"
@@ -149,7 +150,7 @@ func (ep *Epoll) UpdateWorkersLocation(conn *websocket.Conn, lat, lng float64, a
 
 	pipe := ep.redis.Pipeline()
 	ep.NotifyMapMutex.RLock()
-	conns, ok := ep.NotifyMap[workerId[0]]
+	conns, ok := ep.NotifyMap[workerId[0]+"--"+workerId[1]]
 	ep.NotifyMapMutex.RUnlock()
 
 	// response for tracking
@@ -597,203 +598,110 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 
 func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket.Conn) {
 
-	//defer func() {
-	//	log.Printf("INFO: Closing connection for %s", conn.RemoteAddr())
-	//	// Clean up this connection from the notifyMap if it was tracking a driver.
-	//	if trackedDriverID != "" {
-	//		notifyMapMutex.Lock()
-	//		if conns, ok := notifyMap[trackedDriverID]; ok {
-	//			// Remove the current connection (conn) from the slice of connections for the trackedDriverID
-	//			updatedConns := []*websocket.Conn{}
-	//			for _, c := range conns {
-	//				if c != conn {
-	//					updatedConns = append(updatedConns, c)
-	//				}
-	//			}
-	//			if len(updatedConns) == 0 {
-	//				delete(notifyMap, trackedDriverID) // No more trackers for this driver
-	//				log.Printf("INFO: Removed last tracker for driver_id: %s (client: %s)", trackedDriverID, conn.RemoteAddr())
-	//			} else {
-	//				notifyMap[trackedDriverID] = updatedConns
-	//				log.Printf("INFO: Removed client %s from tracking driver_id: %s. Remaining trackers: %d", conn.RemoteAddr(), trackedDriverID, len(updatedConns))
-	//			}
-	//		}
-	//		notifyMapMutex.Unlock()
-	//	}
-	//	conn.Close() // Close the WebSocket connection.
-	//}()
-
-	// This is the message read loop for the successfully established WebSocket connection.
-
-	// We only process text messages.
-
-	// Attempt to unmarshal the JSON message into our Command struct.
-
-	// Handle commands based on CommandType.
 	switch *decodedMsg.CommandType {
 	case "get-bbox":
 		log.Printf("INFO: Handling 'get-bbox' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
-		// Validate required fields for get-bbox.
 		if decodedMsg.MinLat == nil || decodedMsg.MinLng == nil || decodedMsg.MaxLat == nil || decodedMsg.MaxLng == nil {
 			log.Printf("WARN: 'get-bbox' command from %s missing required coordinates. Message: %s", conn.RemoteAddr(), decodedMsg)
-			errMsg := []byte(`{"error": "get-bbox command requires min_lat, min_lng, max_lat, max_lng"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
-				log.Printf("ERROR: Failed to send coordinate error message to %s: %v", conn.RemoteAddr(), writeErr)
-				break
+			if err := socket.SendErrorText(conn, "get-bbox command requires min_lat, min_lng, max_lat, max_lng"); err != nil {
+				log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), err)
 			}
-			return
+
+			break
 		}
 		if config.ResponseFormat == "proto" {
 
 			paginated, err := redis2.FindWorkersInBBoxProto(ep.redis, *decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
 			if err != nil {
 				log.Printf("ERROR: 'get-bbox' failed to find workers for %s: %v", conn.RemoteAddr(), err)
-
-				errMsg := models.ErrorMessageProto{
-					Error: "Failed to retrieve data for bounding box",
+				if err := socket.SendErrorText(conn, "Failed to retrieve data for bounding box"); err != nil {
+					log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), err)
 				}
-				errResp, err := proto.Marshal(&errMsg)
-				if err != nil {
-					return
-				}
-
-				if writeErr := conn.WriteMessage(websocket.BinaryMessage, errResp); writeErr != nil {
-					log.Printf("ERROR: Failed to send bbox data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
-					break
-				}
-				return
-			}
-			newSocketProtoResponse := models.SocketResponseProto{
-				Command:   "get-bbox",
-				Paginated: paginated,
-			}
-			respBytes, marshalErr := proto.Marshal(&newSocketProtoResponse)
-
-			if marshalErr != nil {
-				log.Printf("ERROR: Failed to marshal 'get-bbox' response for %s: %v", conn.RemoteAddr(), marshalErr)
-				//Todo Or send an internal server error message
-				return
-			}
-			if writeErr := conn.WriteMessage(websocket.BinaryMessage, respBytes); writeErr != nil {
-				log.Printf("ERROR: Failed to send 'get-bbox' response to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
+			if err := socket.SendDriverDataProto(conn, paginated, "Failed to send get-drivers data retrieval"); err != nil {
+				log.Printf("ERROR: 'get-bbox' failed to send data for bounding box: %v", err)
+			}
+			break
+
 		} else {
 
 			paginated, err := redis2.FindWorkersInBBox(ep.redis, *decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
 			if err != nil {
-				log.Printf("ERROR: 'get-bbox' failed to find workers for %s: %v", conn.RemoteAddr(), err)
-				errMsg := []byte(`{"error": "Failed to retrieve data for bounding box"}`)
-				if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
-					log.Printf("ERROR: Failed to send bbox data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
-					break
+				log.Printf("WARN: 'get-bbox' command from %s missing required coordinates. Message: %s", conn.RemoteAddr(), decodedMsg)
+				if err := socket.SendErrorText(conn, "get-bbox command requires min_lat, min_lng, max_lat, max_lng"); err != nil {
+					log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), err)
 				}
-				return
-			}
-
-			// Prepare and send the response.
-			newSocketResponse := models.SocketResponse{Command: "get-bbox", Paginated: paginated}
-
-			responseBytes, marshalErr := json.Marshal(newSocketResponse)
-			if marshalErr != nil {
-				log.Printf("ERROR: Failed to marshal 'get-bbox' response for %s: %v", conn.RemoteAddr(), marshalErr)
-				//Todo Or send an internal server error message
-				return
-			}
-			if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
-				log.Printf("ERROR: Failed to send 'get-bbox' response to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
+			if err := socket.SendDriverData(conn, paginated, "Failed to send get-drivers data retrieval"); err != nil {
+				log.Printf("ERROR: 'get-bbox' failed to send data for bounding box: %v", err)
+			}
+			break
+
 		}
 
 	case "get-drivers":
 		log.Printf("INFO: Handling 'get-drivers' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
-		// Validate required fields for get-drivers.
+
 		if decodedMsg.Page == nil {
-			log.Printf("WARN: 'get-drivers' command from %s missing page number. Message: %s", conn.RemoteAddr(), decodedMsg)
-			errMsg := []byte(`{"error": "get-drivers command requires a page number"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
-				log.Printf("ERROR: Failed to send page number error message to %s: %v", conn.RemoteAddr(), writeErr)
-				break
+			if err := socket.SendErrorText(conn, "get-drivers command requires a page number"); err != nil {
+				log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), err)
 			}
 			return
 		}
 
 		if config.ResponseFormat == "proto" {
 			paginated, _, err := redis2.GetAllWorkersPaginatedProto(ep.redis, *decodedMsg.Page, 100) // Assuming page size of 100
+
 			if err != nil {
 				log.Printf("ERROR: 'get-drivers' failed to get all workers for %s: %v", conn.RemoteAddr(), err)
-				errMsg := models.ErrorMessageProto{
-					Error: "Failed to retrieve drivers list",
+				if err := socket.SendErrorText(conn, "Failed to retrieve drivers list"); err != nil {
+					log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), err)
 				}
-				errResp, err := proto.Marshal(&errMsg)
-				if err != nil {
-					return
-				}
-				if writeErr := conn.WriteMessage(websocket.BinaryMessage, errResp); writeErr != nil {
-					log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
-					break
-				}
-				return
-			}
-
-			newSocketResponse := models.SocketResponseProto{Command: "get-drivers", Paginated: paginated}
-
-			responseBytes, marshalErr := proto.Marshal(&newSocketResponse)
-			if marshalErr != nil {
-				log.Printf("ERROR: Failed to marshal 'get-drivers' response for %s: %v", conn.RemoteAddr(), marshalErr)
-				return
-			}
-			if writeErr := conn.WriteMessage(websocket.BinaryMessage, responseBytes); writeErr != nil {
-				log.Printf("ERROR: Failed to send 'get-drivers' response to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
+
+			if err := socket.SendDriverDataProto(conn, paginated, "Failed to send get-drivers data retrieval"); err != nil {
+				log.Printf("ERROR:Failed to send 'get-drivers' response to: %v", err)
+			}
+			break
 
 		} else {
 			paginated, _, err := redis2.GetAllWorkersPaginated(ep.redis, *decodedMsg.Page, 100) // Assuming page size of 100
 			if err != nil {
 				log.Printf("ERROR: 'get-drivers' failed to get all workers for %s: %v", conn.RemoteAddr(), err)
-
-				errMsg := []byte(`{"error": "Failed to retrieve drivers list"}`)
-				if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
-					log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
-					break
+				if err := socket.SendErrorText(conn, "Failed to retrieve drivers list"); err != nil {
+					log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), err)
 				}
-				return
-			}
-			// Prepare and send the response.
-			newSocketResponse := models.SocketResponse{Command: "get-drivers", Paginated: paginated}
-			responseBytes, marshalErr := json.Marshal(newSocketResponse)
-			if marshalErr != nil {
-				log.Printf("ERROR: Failed to marshal 'get-drivers' response for %s: %v", conn.RemoteAddr(), marshalErr)
-				return
-			}
-			if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
-				log.Printf("ERROR: Failed to send 'get-drivers' response to %s: %v", conn.RemoteAddr(), writeErr)
 				break
-
 			}
+
+			if err := socket.SendDriverData(conn, paginated, "Failed to send get-drivers data retrieval"); err != nil {
+				log.Printf("ERROR:Failed to send 'get-drivers' response to: %v", err)
+			}
+			break
+
 		}
 	case "track-driver":
 		log.Printf("INFO: Handling 'track-driver' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
-		// Validate required fields for track-driver.
 		if decodedMsg.DriverId == nil || *decodedMsg.DriverId == "" {
-			log.Printf("WARN: 'track-driver' command from %s missing valid driver_id. Message: %s", conn.RemoteAddr(), decodedMsg)
-			errMsg := []byte(`{"error": "track-driver command requires a valid driver_id"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
-				log.Printf("ERROR: Failed to send driver_id validation error message to %s: %v", conn.RemoteAddr(), writeErr)
-				break
+			if err := socket.SendErrorText(conn, "track-driver command requires a valid driver_id"); err != nil {
+				log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), err)
 			}
 			return
 		}
 
 		newDriverToTrack := *decodedMsg.DriverId
+		sessionId := *decodedMsg.Session
 		ep.NotifyMapMutex.Lock()
+
+		trackingId := newDriverToTrack + "--" + sessionId
 		// TODO check before pushing
-		ep.NotifyMap[newDriverToTrack] = append(ep.NotifyMap[newDriverToTrack], conn)
+		ep.NotifyMap[trackingId] = append(ep.NotifyMap[newDriverToTrack], conn)
 
 		ep.NotifyMapMutex.Unlock()
-		// Send an acknowledgment message.
+
 		ackMsg := []byte(fmt.Sprintf(`{"status": "now tracking driver_id %s"}`, newDriverToTrack))
 		if err := conn.WriteMessage(websocket.TextMessage, ackMsg); err != nil {
 			log.Printf("ERROR: Failed to send tracking acknowledgment to %s: %v", conn.RemoteAddr(), err)
@@ -801,11 +709,12 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		}
 
 	default:
+
 		log.Printf("WARN: Unknown command_type '%s' from %s. Message: %s", decodedMsg.CommandType, conn.RemoteAddr(), decodedMsg)
-		errMsg := []byte(fmt.Sprintf(`{"error": "Unknown command_type: %s"}`, decodedMsg.CommandType))
-		if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
-			log.Printf("ERROR: Failed to send unknown command error message to %s: %v", conn.RemoteAddr(), writeErr)
-			break
+		if err := socket.SendErrorText(conn, "Unknown command_type"); err != nil {
+			log.Printf("ERROR: Failed to send unknown command error message to %s: %v", conn.RemoteAddr(), err)
+
 		}
+
 	}
 }
