@@ -28,4 +28,5 @@ type Command struct {
 	UpdatedAt   *string         `json:"updated_at"`
 	LastSeen    *time.Time      `json:"last_seen"`
 	Active      *bool           `json:"active"`
+	CompanyId   string          `json:"company_id"`
 }

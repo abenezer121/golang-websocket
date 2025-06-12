@@ -5,6 +5,7 @@ type LocationUpdate struct {
 	Latitude  float64 `json:"lat"`
 	Longitude float64 `json:"lng"`
 	Timestamp string  `json:"timestamp"`
+	CompanyId string  `json:"company_id"`
 	UnixTime  string  `json:"unix_time"`
 }
 type SocketResponse struct {

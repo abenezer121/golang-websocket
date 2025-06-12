@@ -66,7 +66,7 @@ func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m 
 	return e, nil
 }
 
-func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error {
+func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64, companyId string) error {
 	ctx := context.Background()
 
 	now := time.Now()
@@ -79,13 +79,14 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 	ep.NotifyMapMutex.RUnlock()
 
 	if ok {
-		broken := []int{} // collect indexes of dead connections
+		broken := []int{}
 		update := models.LocationUpdate{
 			WorkerID:  workerId,
 			Latitude:  lat,
 			Longitude: lng,
 			Timestamp: nowStr,
 			UnixTime:  nowUnixStr,
+			CompanyId: companyId,
 		}
 
 		response := models.SocketResponse{
@@ -151,6 +152,7 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 			Id:        workerId,
 			Lat:       &lat,
 			Lng:       &lng,
+			CompanyId: companyId,
 			CreatedAt: &nowStr,
 			UpdatedAt: &nowStr,
 			Active:    &active,
@@ -164,6 +166,7 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 				Id:        workerId,
 				Lat:       &lat,
 				Lng:       &lng,
+				CompanyId: companyId,
 				CreatedAt: &nowStr,
 				UpdatedAt: &nowStr,
 				Active:    &active,
@@ -173,6 +176,7 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64) error 
 			workerToStore = existingWorker
 			workerToStore.Lat = &lat
 			workerToStore.Lng = &lng
+			workerToStore.CompanyId = companyId
 			workerToStore.UpdatedAt = &nowStr
 			workerToStore.Active = &active
 
@@ -320,7 +324,7 @@ func (ep *Epoll) Wait() {
 			continue
 		}
 
-		// Process events concurrently for better handling of multiple clients
+		// process events concurrently
 		for i := 0; i < n; i++ {
 			ev := &events[i]
 			fd := int(ev.Fd)
@@ -432,7 +436,7 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 			if worker.CommandType != nil {
 				ep.HandleWatcherMessage(worker, conn)
 			} else {
-				err = ep.UpdateWorkersLocation(worker.Id, *worker.Lat, *worker.Lng)
+				err = ep.UpdateWorkersLocation(worker.Id, *worker.Lat, *worker.Lng, worker.CompanyId)
 			}
 		case websocket.CloseMessage:
 
@@ -468,39 +472,6 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 
 func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket.Conn) {
 
-	//defer func() {
-	//	log.Printf("INFO: Closing connection for %s", conn.RemoteAddr())
-	//	// Clean up this connection from the notifyMap if it was tracking a driver.
-	//	if trackedDriverID != "" {
-	//		notifyMapMutex.Lock()
-	//		if conns, ok := notifyMap[trackedDriverID]; ok {
-	//			// Remove the current connection (conn) from the slice of connections for the trackedDriverID
-	//			updatedConns := []*websocket.Conn{}
-	//			for _, c := range conns {
-	//				if c != conn {
-	//					updatedConns = append(updatedConns, c)
-	//				}
-	//			}
-	//			if len(updatedConns) == 0 {
-	//				delete(notifyMap, trackedDriverID) // No more trackers for this driver
-	//				log.Printf("INFO: Removed last tracker for driver_id: %s (client: %s)", trackedDriverID, conn.RemoteAddr())
-	//			} else {
-	//				notifyMap[trackedDriverID] = updatedConns
-	//				log.Printf("INFO: Removed client %s from tracking driver_id: %s. Remaining trackers: %d", conn.RemoteAddr(), trackedDriverID, len(updatedConns))
-	//			}
-	//		}
-	//		notifyMapMutex.Unlock()
-	//	}
-	//	conn.Close() // Close the WebSocket connection.
-	//}()
-
-	// This is the message read loop for the successfully established WebSocket connection.
-
-	// We only process text messages.
-
-	// Attempt to unmarshal the JSON message into our Command struct.
-
-	// Handle commands based on CommandType.
 	switch *decodedMsg.CommandType {
 	case "get-bbox":
 		log.Printf("INFO: Handling 'get-bbox' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)

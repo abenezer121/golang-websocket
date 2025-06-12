@@ -93,13 +93,15 @@ func main() {
 	for {
 		log.Printf("Sending message (step %d)", state.currentStep)
 		msg := struct {
-			Id  string  `json:"id"`
-			Lat float64 `json:"lat"`
-			Lng float64 `json:"lng"`
+			Id        string  `json:"id"`
+			Lat       float64 `json:"lat"`
+			Lng       float64 `json:"lng"`
+			CompanyId string  `json:"company_id"`
 		}{
-			Id:  *id,
-			Lat: startLat + (endLat-startLat)*float64(state.currentStep)/float64(totalSteps),
-			Lng: startLng + (endLng-startLng)*float64(state.currentStep)/float64(totalSteps),
+			Id:        *id,
+			Lat:       startLat + (endLat-startLat)*float64(state.currentStep)/float64(totalSteps),
+			Lng:       startLng + (endLng-startLng)*float64(state.currentStep)/float64(totalSteps),
+			CompanyId: "beu",
 		}
 
 		// Increment step and reset if needed

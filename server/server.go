@@ -61,8 +61,6 @@ func main() {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}
 
-	//go epollInstance.StartConnectionHealthCheck(context.Background(), 2*time.Second)
-
 	// Ensure epoll FD is closed on shutdown (after wait loop exits)
 	defer func() {
 		log.Printf("Closing epoll FD: %d", epollInstance.Fd)
@@ -71,15 +69,7 @@ func main() {
 		}
 	}()
 
-	// Start Worker Goroutines
-	//eventQueue := &models.EventQueue{}
 	workerWg := &sync.WaitGroup{}
-	//util.StartWorkers(numWorkers, epollInstance, jobChan, workerWg, eventQueue)
-
-	//// Start Connection Health Checker
-	//healthCheckCtx, cancelHealthCheck := context.WithCancel(appCtx) // Inherit from appCtx
-	//defer cancelHealthCheck()
-	//go epollInstance.StartConnectionHealthCheck(healthCheckCtx, *models.PingInterval)
 
 	// Configure HTTP Server for WebSocket endpoint
 	mux := http.NewServeMux()
@@ -87,13 +77,10 @@ func main() {
 		handlers.WsHander(upgrader, w, r, epollInstance)
 	})
 
-	// track
-	// get path
 	mux.HandleFunc("/activity", func(w http.ResponseWriter, r *http.Request) {
 		handlers.ControlHandler(upgrader, w, r, epollInstance)
 	})
 
-	// Configure and Start Metrics Server (on a separate port)
 	if *models.MetricsAddr != "" {
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", handlers.MetricsHandler(serverMetrics))
@@ -123,7 +110,6 @@ func main() {
 		log.Println("Metrics server disabled.")
 	}
 
-	// Configure and Start Main WebSocket Server
 	srv := &http.Server{
 		Addr:    *models.Addr,
 		Handler: mux,
@@ -133,7 +119,6 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Goroutine to run the main server
 	go func() {
 		log.Printf("Starting WebSocket server on %s", *models.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -157,9 +142,10 @@ func main() {
 	} else {
 		log.Println("Main HTTP server stopped accepting new connections.")
 	}
+
 	// signal Epoll loop, Workers, and Health Checker to stop
 	log.Println("Signalling epoll loop, workers, and health checker to stop...")
-	cancelApp() // This triggers shutdown in epoll.wait, workerFunc, startConnectionHealthCheck
+	cancelApp()
 
 	log.Println("Waiting for epoll loop to stop...")
 	epollInstance.ShutdownWg.Wait()
@@ -186,12 +172,3 @@ func main() {
 
 	log.Println("Server gracefully shut down.")
 }
-
-// Todo filter out drivers based on user input
-// TODO currently the redis is filtered out when requested
-// TODO handle incoming messages efficiently
-// TODO health checker
-// TODO remove disconnected drivers from redis
-// TODO filter out unpdated from redis
-// Todo Redis Cleanup
-// Todo use gorouting pool instead of creating everytime in the epoll
