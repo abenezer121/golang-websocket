@@ -3,7 +3,7 @@ package models
 import (
 	"flag"
 	"runtime"
-	"sync"
+	// "sync"
 	"sync/atomic"
 	"time"
 )
@@ -25,10 +25,10 @@ type EventJob struct {
 	Events uint32
 }
 
-type EventQueue struct {
-	Mu    sync.Mutex
-	Queue []EventJob
-}
+// type EventQueue struct {
+// 	Mu    sync.Mutex
+// 	Queue []EventJob
+// }
 
 type Metrics struct {
 	StartTime                 time.Time
@@ -51,19 +51,19 @@ type Metrics struct {
 	ProcessingErrors          atomic.Int64
 }
 
-func (eq *EventQueue) enqueue(job EventJob) {
-	eq.Mu.Lock()
-	defer eq.Mu.Unlock()
-	eq.Queue = append(eq.Queue, job)
-}
+// func (eq *EventQueue) enqueue(job EventJob) {
+// 	eq.Mu.Lock()
+// 	defer eq.Mu.Unlock()
+// 	eq.Queue = append(eq.Queue, job)
+// }
 
-func (eq *EventQueue) Dequeue() (EventJob, bool) {
-	eq.Mu.Lock()
-	defer eq.Mu.Unlock()
-	if len(eq.Queue) == 0 {
-		return EventJob{}, false
-	}
-	job := eq.Queue[0]
-	eq.Queue = eq.Queue[1:]
-	return job, true
-}
+// func (eq *EventQueue) Dequeue() (EventJob, bool) {
+// 	eq.Mu.Lock()
+// 	defer eq.Mu.Unlock()
+// 	if len(eq.Queue) == 0 {
+// 		return EventJob{}, false
+// 	}
+// 	job := eq.Queue[0]
+// 	eq.Queue = eq.Queue[1:]
+// 	return job, true
+// }

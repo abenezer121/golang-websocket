@@ -24,12 +24,14 @@ import (
 type Epoll struct {
 	Fd           int
 	Connections  sync.Map
+	ConnWriteMu  sync.Map // map[*websocket.Conn]*sync.Mutex for serialized writes per conn
 	Metrics      *models.Metrics
 	redis        *redis.Client
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 
-	WorkerChan  chan<- models.EventJob
+	// new= made the channel bidirectional
+	WorkerChan  chan models.EventJob
 	ShutdownCtx context.Context
 	ShutdownWg  sync.WaitGroup // to wait for the epoll loop
 	// roga    core.Roga
@@ -41,7 +43,7 @@ type Epoll struct {
 	DriverTrackMapMutex *sync.RWMutex
 }
 
-func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m *models.Metrics, rt, wt time.Duration, notifyMap map[string][]*websocket.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client, driverTrackMap map[*websocket.Conn]string, driverTrackMapMutex *sync.RWMutex) (*Epoll, error) {
+func NewEpoll(workerChan chan models.EventJob, workerCount int, shutdownCtx context.Context, m *models.Metrics, rt, wt time.Duration, notifyMap map[string][]*websocket.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client, driverTrackMap map[*websocket.Conn]string, driverTrackMapMutex *sync.RWMutex) (*Epoll, error) {
 	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		return nil, fmt.Errorf("epoll_create1: %w", err)
@@ -61,6 +63,9 @@ func NewEpoll(workerChan chan<- models.EventJob, shutdownCtx context.Context, m 
 		DriverTrackMap:      driverTrackMap,
 		DriverTrackMapMutex: driverTrackMapMutex,
 	}
+	//new added line to start the workers
+	e.StartWorkers(workerCount) 
+
 	e.ShutdownWg.Add(1)
 	go e.Wait()
 	return e, nil
@@ -76,10 +81,11 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64, compan
 	pipe := ep.redis.Pipeline()
 	ep.NotifyMapMutex.RLock()
 	conns, ok := ep.NotifyMap[workerId]
+	connsCopy := append([]*websocket.Conn(nil), conns...)
 	ep.NotifyMapMutex.RUnlock()
 
 	if ok {
-		broken := []int{}
+		broken := make(map[*websocket.Conn]struct{})
 		update := models.LocationUpdate{
 			WorkerID:  workerId,
 			Latitude:  lat,
@@ -99,26 +105,20 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64, compan
 			return fmt.Errorf("json marshal error: %w", err)
 		}
 
-		for i, conn := range conns {
-			err := conn.WriteMessage(websocket.TextMessage, msg)
+		for _, conn := range connsCopy {
+			err := ep.writeText(conn, msg)
 			if err != nil {
 				log.Printf("Failed to write to connection for worker %s: %v", workerId, err)
-				broken = append(broken, i)
+				broken[conn] = struct{}{}
 			}
 		}
 		// clean up broken connections
 		if len(broken) > 0 {
 			ep.NotifyMapMutex.Lock()
-			alive := make([]*websocket.Conn, 0, len(conns)-len(broken))
-			for i, conn := range conns {
-				skip := false
-				for _, badIndex := range broken {
-					if i == badIndex {
-						skip = true
-						break
-					}
-				}
-				if !skip {
+			current := ep.NotifyMap[workerId]
+			alive := make([]*websocket.Conn, 0, len(current))
+			for _, conn := range current {
+				if _, isBroken := broken[conn]; !isBroken {
 					alive = append(alive, conn)
 				}
 			}
@@ -218,8 +218,9 @@ func (ep *Epoll) Add(conn *websocket.Conn) error {
 	// EPOLLHUP: Monitor for hangup (implicitly monitored).
 
 	// Add to epoll with edge-triggered mode
+	// NEW = Add EPOLLONESHOT to the events bitmask
 	err = unix.EpollCtl(ep.Fd, unix.EPOLL_CTL_ADD, fd, &unix.EpollEvent{
-		Events: unix.EPOLLIN | unix.EPOLLOUT | unix.EPOLLRDHUP | unix.EPOLLET | unix.EPOLLERR | unix.EPOLLHUP,
+		Events: unix.EPOLLIN | unix.EPOLLOUT | unix.EPOLLRDHUP | unix.EPOLLET | unix.EPOLLERR | unix.EPOLLHUP | unix.EPOLLONESHOT,
 		Fd:     int32(fd),
 	})
 	if err != nil {
@@ -230,6 +231,7 @@ func (ep *Epoll) Add(conn *websocket.Conn) error {
 	}
 
 	ep.Connections.Store(fd, conn)
+	ep.ConnWriteMu.Store(conn, &sync.Mutex{})
 	count := ep.Metrics.CurrentConnections.Add(1)
 	ep.Metrics.TotalConnections.Add(1)
 	log.Printf("New connection: Total count %d\n", count)
@@ -268,6 +270,8 @@ func (ep *Epoll) Delete(fd int) error {
 func (ep *Epoll) DeleteAndClose(fd int, conn *websocket.Conn, reason string, byPeer bool) {
 	_ = ep.Delete(fd)
 	if conn != nil {
+		ep.cleanupConnTracking(conn)
+		ep.ConnWriteMu.Delete(conn)
 
 		err := conn.Close()
 		if err != nil {
@@ -286,16 +290,78 @@ func (ep *Epoll) DeleteAndClose(fd int, conn *websocket.Conn, reason string, byP
 	} else {
 		ep.Metrics.ConnectionsClosedByServer.Add(1)
 	}
+}
 
+func (ep *Epoll) cleanupConnTracking(conn *websocket.Conn) {
+	ep.DriverTrackMapMutex.Lock()
+	delete(ep.DriverTrackMap, conn)
+	ep.DriverTrackMapMutex.Unlock()
+
+	ep.NotifyMapMutex.Lock()
+	for driverID, watchers := range ep.NotifyMap {
+		alive := make([]*websocket.Conn, 0, len(watchers))
+		for _, watcherConn := range watchers {
+			if watcherConn != conn {
+				alive = append(alive, watcherConn)
+			}
+		}
+		if len(alive) == 0 {
+			delete(ep.NotifyMap, driverID)
+			continue
+		}
+		ep.NotifyMap[driverID] = alive
+	}
+	ep.NotifyMapMutex.Unlock()
+}
+
+func (ep *Epoll) writeText(conn *websocket.Conn, payload []byte) error {
+	if conn == nil {
+		return fmt.Errorf("nil websocket connection")
+	}
+
+	muVal, ok := ep.ConnWriteMu.Load(conn)
+	if !ok {
+		newMu := &sync.Mutex{}
+		actual, _ := ep.ConnWriteMu.LoadOrStore(conn, newMu)
+		muVal = actual
+	}
+
+	mu := muVal.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if ep.WriteTimeout > 0 {
+		if err := conn.SetWriteDeadline(time.Now().Add(ep.WriteTimeout)); err != nil {
+			return err
+		}
+	}
+
+	err := conn.WriteMessage(websocket.TextMessage, payload)
+	if err != nil {
+		ep.Metrics.WriteErrors.Add(1)
+		return err
+	}
+	ep.Metrics.MessagesSent.Add(1)
+	ep.Metrics.BytesSent.Add(int64(len(payload)))
+	return nil
+}
+
+// new function to start worker goroutines that will process events from the channel instead of using mutexes
+func (ep *Epoll) StartWorkers(count int) {
+	for i := 0; i < count; i++ {
+		go func() {
+			for job := range ep.WorkerChan { // Workers wait here for jobs
+				ep.HandleEvents(job.Fd, job.Events)
+			}
+		}()
+	}
 }
 
 func (ep *Epoll) Wait() {
 	defer ep.ShutdownWg.Done()
 	defer log.Println("Epoll wait loop stopped.")
-	log.Println("Starting epoll wait loop for direct event processing...")
 
-	events := make([]unix.EpollEvent, 128) // Buffer for epoll events
-
+	events := make([]unix.EpollEvent, 128)
 	for {
 		select {
 		case <-ep.ShutdownCtx.Done():
@@ -315,33 +381,22 @@ func (ep *Epoll) Wait() {
 			}
 			log.Printf("ERROR: EpollWait failed: %v", err)
 			ep.Metrics.EpollErrors.Add(1)
-
-			select {
-			case <-time.After(100 * time.Millisecond):
-			case <-ep.ShutdownCtx.Done():
-				return
-			}
 			continue
 		}
 
-		// process events concurrently
 		for i := 0; i < n; i++ {
-			ev := &events[i]
-			fd := int(ev.Fd)
-			eventFlags := ev.Events
-
 			select {
 			case <-ep.ShutdownCtx.Done():
 				return
-			default:
-				// make this go routing pool
-				go func(fd int, flags uint32) {
-					ep.HandleEvents(fd, flags)
-				}(fd, eventFlags)
+			case ep.WorkerChan <- models.EventJob{
+				Fd:     int(events[i].Fd),
+				Events: events[i].Events,
+			}:
 			}
 		}
 	}
 }
+
 func (ep *Epoll) HandleEvents(fd int, events uint32) {
 
 	connVal, ok := ep.Connections.Load(fd)
@@ -352,19 +407,29 @@ func (ep *Epoll) HandleEvents(fd int, events uint32) {
 	}
 	conn := connVal.(*websocket.Conn)
 
-	if events&unix.EPOLLIN != 0 {
-		ep.HandleRead(fd, conn)
-		return
-
-	}
-
 	if events&unix.EPOLLHUP != 0 || events&unix.EPOLLERR != 0 {
 
 		log.Printf("Client disconnected (fd: %d)", fd)
-		err := ep.Delete(fd)
-		if err != nil {
-		}
+		ep.DeleteAndClose(fd, conn, "EPOLLERR/EPOLLHUP", true)
 		return
+	}
+
+	if events&unix.EPOLLIN != 0 {
+		ep.HandleRead(fd, conn)
+	}
+
+	if _, stillConnected := ep.Connections.Load(fd); stillConnected {
+		ep.rearm(fd)
+	}
+}
+
+func (ep *Epoll) rearm(fd int) {
+	if err := unix.EpollCtl(ep.Fd, unix.EPOLL_CTL_MOD, fd, &unix.EpollEvent{
+		Events: unix.EPOLLIN | unix.EPOLLRDHUP | unix.EPOLLET | unix.EPOLLONESHOT,
+		Fd:     int32(fd),
+	}); err != nil && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EBADF) {
+		log.Printf("WARN: failed to rearm FD %d: %v", fd, err)
+		ep.Metrics.EpollErrors.Add(1)
 	}
 }
 
@@ -436,7 +501,16 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 			if worker.CommandType != nil {
 				ep.HandleWatcherMessage(worker, conn)
 			} else {
+				if worker.Lat == nil || worker.Lng == nil {
+					log.Printf("WARN: location update missing lat/lng on FD %d (%s)", fd, conn.RemoteAddr())
+					ep.Metrics.ProcessingErrors.Add(1)
+					continue
+				}
 				err = ep.UpdateWorkersLocation(worker.Id, *worker.Lat, *worker.Lng, worker.CompanyId)
+				if err != nil {
+					log.Printf("ERROR: failed updating worker location for FD %d (%s): %v", fd, conn.RemoteAddr(), err)
+					ep.Metrics.ProcessingErrors.Add(1)
+				}
 			}
 		case websocket.CloseMessage:
 
@@ -479,7 +553,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		if decodedMsg.MinLat == nil || decodedMsg.MinLng == nil || decodedMsg.MaxLat == nil || decodedMsg.MaxLng == nil {
 			log.Printf("WARN: 'get-bbox' command from %s missing required coordinates. Message: %s", conn.RemoteAddr(), decodedMsg)
 			errMsg := []byte(`{"error": "get-bbox command requires min_lat, min_lng, max_lat, max_lng"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+			if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 				log.Printf("ERROR: Failed to send coordinate error message to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
@@ -491,7 +565,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		if err != nil {
 			log.Printf("ERROR: 'get-bbox' failed to find workers for %s: %v", conn.RemoteAddr(), err)
 			errMsg := []byte(`{"error": "Failed to retrieve data for bounding box"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+			if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 				log.Printf("ERROR: Failed to send bbox data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
@@ -506,7 +580,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 			//Todo Or send an internal server error message
 			return
 		}
-		if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
+		if writeErr := ep.writeText(conn, responseBytes); writeErr != nil {
 			log.Printf("ERROR: Failed to send 'get-bbox' response to %s: %v", conn.RemoteAddr(), writeErr)
 			break
 		}
@@ -517,7 +591,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		if decodedMsg.Page == nil {
 			log.Printf("WARN: 'get-drivers' command from %s missing page number. Message: %s", conn.RemoteAddr(), decodedMsg)
 			errMsg := []byte(`{"error": "get-drivers command requires a page number"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+			if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 				log.Printf("ERROR: Failed to send page number error message to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
@@ -529,7 +603,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		if err != nil {
 			log.Printf("ERROR: 'get-drivers' failed to get all workers for %s: %v", conn.RemoteAddr(), err)
 			errMsg := []byte(`{"error": "Failed to retrieve drivers list"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+			if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 				log.Printf("ERROR: Failed to send get-drivers data retrieval error message to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
@@ -543,7 +617,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 			log.Printf("ERROR: Failed to marshal 'get-drivers' response for %s: %v", conn.RemoteAddr(), marshalErr)
 			return
 		}
-		if writeErr := conn.WriteMessage(websocket.TextMessage, responseBytes); writeErr != nil {
+		if writeErr := ep.writeText(conn, responseBytes); writeErr != nil {
 			log.Printf("ERROR: Failed to send 'get-drivers' response to %s: %v", conn.RemoteAddr(), writeErr)
 			break
 		}
@@ -554,7 +628,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		if decodedMsg.DriverId == nil || *decodedMsg.DriverId == "" {
 			log.Printf("WARN: 'track-driver' command from %s missing valid driver_id. Message: %s", conn.RemoteAddr(), decodedMsg)
 			errMsg := []byte(`{"error": "track-driver command requires a valid driver_id"}`)
-			if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+			if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 				log.Printf("ERROR: Failed to send driver_id validation error message to %s: %v", conn.RemoteAddr(), writeErr)
 				break
 			}
@@ -562,14 +636,45 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		}
 
 		newDriverToTrack := *decodedMsg.DriverId
-		ep.NotifyMapMutex.Lock()
-		// TODO check before pushing
-		ep.NotifyMap[newDriverToTrack] = append(ep.NotifyMap[newDriverToTrack], conn)
 
+		ep.DriverTrackMapMutex.Lock()
+		if oldDriver, tracked := ep.DriverTrackMap[conn]; tracked && oldDriver != newDriverToTrack {
+			ep.NotifyMapMutex.Lock()
+			watchers := ep.NotifyMap[oldDriver]
+			filtered := make([]*websocket.Conn, 0, len(watchers))
+			for _, c := range watchers {
+				if c != conn {
+					filtered = append(filtered, c)
+				}
+			}
+			if len(filtered) == 0 {
+				delete(ep.NotifyMap, oldDriver)
+			} else {
+				ep.NotifyMap[oldDriver] = filtered
+			}
+			ep.NotifyMapMutex.Unlock()
+		}
+
+		ep.NotifyMapMutex.Lock()
+		watchers := ep.NotifyMap[newDriverToTrack]
+		alreadyExists := false
+		for _, watcher := range watchers {
+			if watcher == conn {
+				alreadyExists = true
+				break
+			}
+		}
+		if !alreadyExists {
+			ep.NotifyMap[newDriverToTrack] = append(ep.NotifyMap[newDriverToTrack], conn)
+		}
 		ep.NotifyMapMutex.Unlock()
+
+		ep.DriverTrackMap[conn] = newDriverToTrack
+		ep.DriverTrackMapMutex.Unlock()
+
 		// Send an acknowledgment message.
 		ackMsg := []byte(fmt.Sprintf(`{"status": "now tracking driver_id %s"}`, newDriverToTrack))
-		if err := conn.WriteMessage(websocket.TextMessage, ackMsg); err != nil {
+		if err := ep.writeText(conn, ackMsg); err != nil {
 			log.Printf("ERROR: Failed to send tracking acknowledgment to %s: %v", conn.RemoteAddr(), err)
 			return
 		}
@@ -577,7 +682,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 	default:
 		log.Printf("WARN: Unknown command_type '%s' from %s. Message: %s", decodedMsg.CommandType, conn.RemoteAddr(), decodedMsg)
 		errMsg := []byte(fmt.Sprintf(`{"error": "Unknown command_type: %s"}`, decodedMsg.CommandType))
-		if writeErr := conn.WriteMessage(websocket.TextMessage, errMsg); writeErr != nil {
+		if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 			log.Printf("ERROR: Failed to send unknown command error message to %s: %v", conn.RemoteAddr(), writeErr)
 			break
 		}
