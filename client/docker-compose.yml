@@ -1,8 +1,12 @@
 services:
   ws-client:
+    build: .
     image: ws-client
     deploy:
-      replicas: 100
+      replicas: 1
     network_mode: "bridge"
-    command: ["/app/client", "-conn=100", "-ip=9.141.20.46"]
-
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["/app/client", "-ip=host.docker.internal", "-n=5000"]
+# "-conn=100", "-ip=9.141.20.46"
+    

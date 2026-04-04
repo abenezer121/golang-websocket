@@ -27,8 +27,17 @@ var upgrader = websocket.Upgrader{
 		return true
 	},
 }
+// to monitor the system
+func monitorSystem() {
+    for {
+        log.Printf("[MONITOR] Active Goroutines: %d", runtime.NumGoroutine())
+        time.Sleep(2*time.Second) 
+    }
+}
+
 
 func main() {
+	go monitorSystem()
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
@@ -42,7 +51,7 @@ func main() {
 		numWorkers = runtime.NumCPU() * 2
 	}
 
-	jobChan := make(chan models.EventJob, *models.Workers*4)
+	jobChan := make(chan models.EventJob, numWorkers*4)
 
 	appCtx, cancelApp := context.WithCancel(context.Background())
 	defer cancelApp()
@@ -56,7 +65,7 @@ func main() {
 		DB:   0,
 	})
 
-	epollInstance, err := epoll.NewEpoll(jobChan, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb, driverTrackMap, driverTrackMapMutex)
+	epollInstance, err := epoll.NewEpoll(jobChan, numWorkers,appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb, driverTrackMap, driverTrackMapMutex)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}

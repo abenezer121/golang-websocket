@@ -1,12 +1,15 @@
+// New code with the drivers simulation running in one container 
 package main
 
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/url"
 	"os"
+	"sync" 
 	"syscall"
 	"time"
 
@@ -14,116 +17,73 @@ import (
 )
 
 var (
-	ip  = flag.String("ip", "127.0.0.1", "server IP")
-	lat = flag.Float64("lat", 9.34234, "starting lat")
-	lng = flag.Float64("lng", 38.234234, "starting lng")
-	id  = flag.String("id", "0", "server ID")
+	ip           = flag.String("ip", "127.0.0.1", "server IP")
+	lat          = flag.Float64("lat", 9.34234, "starting lat")
+	lng          = flag.Float64("lng", 38.234234, "starting lng")
+	numClients   = flag.Int("n", 1000, "number of clients to simulate") // New flag for scaling
 )
 
-type connectionState struct {
-	conn        *websocket.Conn
-	currentStep int
-}
+func startDriver(driverID string, serverIP string, startLat, startLng float64, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-func main() {
-	flag.Usage = func() {
-		io.WriteString(os.Stderr, `Websockets client generator Example usage: ./client -ip=127.0.0.1`)
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-
-	// Set file descriptor limits
-	var rlimit syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit); err != nil {
-		log.Fatalf("Error getting initial rlimit: %v", err)
-	}
-	log.Printf("Initial limits: Soft=%d, Hard=%d\n", rlimit.Cur, rlimit.Max)
-
-	desiredLimit := rlimit
-	desiredLimit.Cur = desiredLimit.Max
-	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &desiredLimit); err != nil {
-		log.Printf("!!! Error setting rlimit: %v !!!", err)
-	}
-
-	var actualLimit syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &actualLimit); err != nil {
-		log.Fatalf("Error getting rlimit AFTER setting attempt: %v", err)
-	}
-	log.Printf(">>> Actual limits AFTER Setrlimit call: Soft=%d, Hard=%d <<<\n", actualLimit.Cur, actualLimit.Max)
-
-	u := url.URL{Scheme: "ws", Host: *ip + ":8082", Path: "/ws"}
-	log.Printf("Connecting to %s", u.String())
-
-	// Create single connection
+	u := url.URL{Scheme: "ws", Host: serverIP + ":8082", Path: "/ws"}
 	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		log.Printf("Driver %s failed to connect: %v", driverID, err)
+		return
 	}
-	defer func() {
-		c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
-		time.Sleep(time.Second)
-		c.Close()
-	}()
+	defer c.Close()
 
-	state := &connectionState{
-		conn:        c,
-		currentStep: 0,
-	}
-
-	log.Printf("Connection established successfully")
-
-	// Add message reader goroutine
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			_, message, err := c.ReadMessage()
-			if err != nil {
-				log.Printf("Read error: %v", err)
-				return
-			}
-			log.Printf("Received: %s", message)
-		}
-	}()
-
-	startLat, startLng := *lat, *lng
-	endLat, endLng := 9.5124, 39.2288 // Example destination coordinates
+	currentStep := 0
 	totalSteps := 100
+	endLat, endLng := 9.5124, 39.2288
 
 	for {
-		log.Printf("Sending message (step %d)", state.currentStep)
 		msg := struct {
 			Id        string  `json:"id"`
 			Lat       float64 `json:"lat"`
 			Lng       float64 `json:"lng"`
 			CompanyId string  `json:"company_id"`
 		}{
-			Id:        *id,
-			Lat:       startLat + (endLat-startLat)*float64(state.currentStep)/float64(totalSteps),
-			Lng:       startLng + (endLng-startLng)*float64(state.currentStep)/float64(totalSteps),
+			Id:        driverID,
+			Lat:       startLat + (endLat-startLat)*float64(currentStep)/float64(totalSteps),
+			Lng:       startLng + (endLng-startLng)*float64(currentStep)/float64(totalSteps),
 			CompanyId: "beu",
 		}
 
-		// Increment step and reset if needed
-		state.currentStep++
-		if state.currentStep > totalSteps {
-			state.currentStep = 0
-		}
-
-		// Marshal to JSON properly
-		jsonMsg, err := json.Marshal(msg)
-		if err != nil {
-			log.Printf("Failed to marshal message: %v", err)
-			continue
-		}
-
-		if err := state.conn.WriteMessage(websocket.TextMessage, jsonMsg); err != nil {
-			log.Printf("Failed to send message: %v", err)
+		jsonMsg, _ := json.Marshal(msg)
+		if err := c.WriteMessage(websocket.TextMessage, jsonMsg); err != nil {
+			log.Printf("Driver %s lost connection", driverID)
 			return
-		} else {
-			log.Printf("Sent: %s", jsonMsg)
 		}
 
+		currentStep = (currentStep + 1) % totalSteps
 		time.Sleep(time.Second * 2)
 	}
+}
+
+func main() {
+	flag.Usage = func() {
+		io.WriteString(os.Stderr, `Websockets client generator Example usage: ./client -ip=127.0.0.1 -n=1000`)
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	var rlimit syscall.Rlimit
+	syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit)
+	rlimit.Cur = rlimit.Max
+	syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rlimit)
+
+	log.Printf("Starting simulation for %d clients...", *numClients)
+
+	var wg sync.WaitGroup
+
+	
+	for i := 1; i <= *numClients; i++ {
+		wg.Add(1)
+		driverID := fmt.Sprintf("driver_%d", i)
+		go startDriver(driverID, *ip, *lat, *lng, &wg)
+		time.Sleep(5 * time.Millisecond)
+	}
+	wg.Wait()
 }
