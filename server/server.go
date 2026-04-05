@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fastsocket/epoll"
+	grpcapi "fastsocket/grpc"
 	"fastsocket/handlers"
 	"fastsocket/models"
+	"fastsocket/tracker"
 	"fastsocket/util"
 	"flag"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sys/unix"
+	grpc "google.golang.org/grpc"
 	"log"
 	"net"
 	"net/http"
@@ -27,14 +30,14 @@ var upgrader = websocket.Upgrader{
 		return true
 	},
 }
+
 // to monitor the system
 func monitorSystem() {
-    for {
-        log.Printf("[MONITOR] Active Goroutines: %d", runtime.NumGoroutine())
-        time.Sleep(2*time.Second) 
-    }
+	for {
+		log.Printf("[MONITOR] Active Goroutines: %d", runtime.NumGoroutine())
+		time.Sleep(2 * time.Second)
+	}
 }
-
 
 func main() {
 	go monitorSystem()
@@ -56,16 +59,13 @@ func main() {
 	appCtx, cancelApp := context.WithCancel(context.Background())
 	defer cancelApp()
 
-	notifyMap := make(map[string][]*websocket.Conn)
-	driverTrackMap := make(map[*websocket.Conn]string)
-	driverTrackMapMutex := &sync.RWMutex{}
-	notifyMapMutex := &sync.RWMutex{}
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
 	})
+	trackerSvc := tracker.NewService(rdb)
 
-	epollInstance, err := epoll.NewEpoll(jobChan, numWorkers,appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb, driverTrackMap, driverTrackMapMutex)
+	epollInstance, err := epoll.NewEpoll(jobChan, numWorkers, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, rdb, trackerSvc)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}
@@ -136,6 +136,20 @@ func main() {
 		log.Println("WebSocket server stopped listening.")
 	}()
 
+	grpcLis, err := net.Listen("tcp", *models.GRPCAddr)
+	if err != nil {
+		log.Fatalf("FATAL: Failed to listen for gRPC on %s: %v", *models.GRPCAddr, err)
+	}
+	grpcSrv := grpc.NewServer()
+	grpcapi.Register(grpcSrv, trackerSvc)
+
+	go func() {
+		log.Printf("Starting gRPC server on %s", *models.GRPCAddr)
+		if err := grpcSrv.Serve(grpcLis); err != nil {
+			log.Printf("gRPC server stopped: %v", err)
+		}
+	}()
+
 	// --- Graceful Shutdown Handling ---
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -151,6 +165,22 @@ func main() {
 	} else {
 		log.Println("Main HTTP server stopped accepting new connections.")
 	}
+
+	log.Println("Shutting down gRPC server...")
+	grpcStopped := make(chan struct{})
+	go func() {
+		grpcSrv.GracefulStop()
+		close(grpcStopped)
+	}()
+
+	select {
+	case <-grpcStopped:
+		log.Println("gRPC server shutdown complete.")
+	case <-time.After(5 * time.Second):
+		log.Println("gRPC graceful shutdown timed out, forcing stop.")
+		grpcSrv.Stop()
+	}
+	_ = grpcLis.Close()
 
 	// signal Epoll loop, Workers, and Health Checker to stop
 	log.Println("Signalling epoll loop, workers, and health checker to stop...")

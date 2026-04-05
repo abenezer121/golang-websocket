@@ -78,7 +78,7 @@ func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64)
 		}
 
 		var worker models.Command
-		if err := json.Unmarshal([]byte(detailStr), worker); err != nil {
+		if err := json.Unmarshal([]byte(detailStr), &worker); err != nil {
 			log.Printf("Error unmarshalling worker detail for %s: %v\n", workerIdsInBox[i], err)
 			continue
 		}

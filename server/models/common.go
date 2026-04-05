@@ -9,6 +9,7 @@ import (
 
 var (
 	Addr             = flag.String("addr", ":8082", "WebSocket service address (e.g., :8080)")
+	GRPCAddr         = flag.String("grpcAddr", ":8090", "gRPC service address (e.g., :8090)")
 	MetricsAddr      = flag.String("metaddr", ":8089", "WebSocket service address (e.g., :8080)")
 	Workers          = flag.Int("workers", runtime.NumCPU()*2, "Number of worker goroutines")
 	ReadBufSize      = flag.Int("readBuf", 4096, "Read buffer size per connection")
