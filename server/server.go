@@ -46,6 +46,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 
 	serverMetrics := &models.Metrics{StartTime: time.Now()} // Initialize Metrics
+	serverGrpcMetrics := &models.GRPCMetrics{StartTime: time.Now()}
 
 	util.SetupRlimit(false)
 
@@ -119,6 +120,34 @@ func main() {
 		log.Println("Metrics server disabled.")
 	}
 
+	if *models.GRPCMetricsAddr != "" {
+		grpcMetricsMux := http.NewServeMux()
+		grpcMetricsMux.Handle("/metrics", handlers.GRPCMetricsHandler(serverGrpcMetrics))
+		grpcMetricsSrv := &http.Server{
+			Addr:    *models.GRPCMetricsAddr,
+			Handler: grpcMetricsMux,
+		}
+		go func() {
+			log.Printf("Starting gRPC Metrics server on %s", *models.GRPCMetricsAddr)
+			if err := grpcMetricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("ERROR: gRPC Metrics server failed: %v", err)
+			}
+			log.Println("gRPC Metrics server stopped.")
+		}()
+		defer func() {
+			shutdownCtxMetrics, cancelMetrics := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelMetrics()
+			log.Println("Shutting down gRPC metrics server...")
+			if err := grpcMetricsSrv.Shutdown(shutdownCtxMetrics); err != nil {
+				log.Printf("ERROR: gRPC Metrics server shutdown failed: %v", err)
+			} else {
+				log.Println("gRPC Metrics server shutdown complete.")
+			}
+		}()
+	} else {
+		log.Println("gRPC Metrics server disabled.")
+	}
+
 	srv := &http.Server{
 		Addr:    *models.Addr,
 		Handler: mux,
@@ -141,7 +170,7 @@ func main() {
 		log.Fatalf("FATAL: Failed to listen for gRPC on %s: %v", *models.GRPCAddr, err)
 	}
 	grpcSrv := grpc.NewServer()
-	grpcapi.Register(grpcSrv, trackerSvc)
+	grpcapi.Register(grpcSrv, trackerSvc, serverGrpcMetrics)
 
 	go func() {
 		log.Printf("Starting gRPC server on %s", *models.GRPCAddr)

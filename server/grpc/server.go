@@ -19,16 +19,20 @@ type Server struct {
 	trackingpb.UnimplementedDriverTrackerServer
 
 	tracker *tracker.Service
+	metrics *models.GRPCMetrics
 }
 
-func Register(grpcServer grpc.ServiceRegistrar, trackerSvc *tracker.Service) {
-	trackingpb.RegisterDriverTrackerServer(grpcServer, &Server{tracker: trackerSvc})
+func Register(grpcServer grpc.ServiceRegistrar, trackerSvc *tracker.Service, metrics *models.GRPCMetrics) {
+	trackingpb.RegisterDriverTrackerServer(grpcServer, &Server{tracker: trackerSvc, metrics: metrics})
 }
 
 func (s *Server) PublishLocation(ctx context.Context, req *trackingpb.DriverLocation) (*trackingpb.PublishAck, error) {
 	if req.GetId() == "" {
+		s.metrics.ProcessingErrors.Add(1)
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
+
+	s.metrics.MessagesReceived.Add(1)
 
 	cmd := models.Command{
 		Id:        req.GetId(),
@@ -37,25 +41,37 @@ func (s *Server) PublishLocation(ctx context.Context, req *trackingpb.DriverLoca
 		CompanyId: req.GetCompanyId(),
 	}
 	if err := s.tracker.ProcessDriverUpdate(cmd); err != nil {
+		s.metrics.ProcessingErrors.Add(1)
 		return nil, status.Errorf(codes.Internal, "publish location: %v", err)
 	}
 
+	s.metrics.MessagesSent.Add(1)
 	return &trackingpb.PublishAck{Status: "location updated"}, nil
 }
 
 func (s *Server) PublishLocationStream(stream trackingpb.DriverTracker_PublishLocationStreamServer) error {
+	s.metrics.CurrentConnections.Add(1)
+	s.metrics.TotalConnections.Add(1)
+	defer s.metrics.CurrentConnections.Add(-1)
+
 	processed := 0
 	for {
 		req, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
+			s.metrics.MessagesSent.Add(1)
 			return stream.SendAndClose(&trackingpb.PublishAck{
 				Status: fmt.Sprintf("processed %d location updates", processed),
 			})
 		}
 		if err != nil {
+			s.metrics.ProcessingErrors.Add(1)
 			return status.Errorf(codes.Unknown, "receive location update: %v", err)
 		}
+
+		s.metrics.MessagesReceived.Add(1)
+
 		if req.GetId() == "" {
+			s.metrics.ProcessingErrors.Add(1)
 			return status.Error(codes.InvalidArgument, "id is required")
 		}
 
@@ -66,6 +82,7 @@ func (s *Server) PublishLocationStream(stream trackingpb.DriverTracker_PublishLo
 			CompanyId: req.GetCompanyId(),
 		}
 		if err := s.tracker.ProcessDriverUpdate(cmd); err != nil {
+			s.metrics.ProcessingErrors.Add(1)
 			return status.Errorf(codes.Internal, "process location update: %v", err)
 		}
 		processed++
@@ -73,12 +90,19 @@ func (s *Server) PublishLocationStream(stream trackingpb.DriverTracker_PublishLo
 }
 
 func (s *Server) TrackDriver(req *trackingpb.TrackDriverRequest, stream trackingpb.DriverTracker_TrackDriverServer) error {
+	s.metrics.CurrentConnections.Add(1)
+	s.metrics.TotalConnections.Add(1)
+	defer s.metrics.CurrentConnections.Add(-1)
+	s.metrics.MessagesReceived.Add(1)
+
 	if req.GetDriverId() == "" {
+		s.metrics.ProcessingErrors.Add(1)
 		return status.Error(codes.InvalidArgument, "driver_id is required")
 	}
 
 	conn := transport.NewGRPCWatcherConnection(stream)
 	if err := s.tracker.TrackDriver(conn, req.GetDriverId()); err != nil {
+		s.metrics.ProcessingErrors.Add(1)
 		return status.Errorf(codes.Internal, "track driver: %v", err)
 	}
 	defer s.tracker.RemoveConnection(conn.ID())

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,7 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"fastsocket/grpc/trackingpb"
 	"github.com/gorilla/websocket"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -21,6 +25,7 @@ var (
 	lat          = flag.Float64("lat", 9.34234, "starting lat")
 	lng          = flag.Float64("lng", 38.234234, "starting lng")
 	numClients   = flag.Int("n", 1000, "number of clients to simulate") // New flag for scaling
+	mode         = flag.String("mode", "ws", "client mode: ws or grpc") // New flag to choose between WebSocket and gRPC the default is ws if u didn't specify the mode
 )
 
 func startDriver(driverID string, serverIP string, startLat, startLng float64, wg *sync.WaitGroup) {
@@ -62,6 +67,47 @@ func startDriver(driverID string, serverIP string, startLat, startLng float64, w
 	}
 }
 
+func startGrpcDriver(driverID string, serverIP string, startLat, startLng float64, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	conn, err := grpc.Dial(serverIP+":8090", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Printf("Driver %s failed to connect: %v", driverID, err)
+		return
+	}
+	defer conn.Close()
+
+	client := trackingpb.NewDriverTrackerClient(conn)
+
+	currentStep := 0
+	totalSteps := 100
+	endLat, endLng := 9.5124, 39.2288
+
+	for {
+		lat := startLat + (endLat-startLat)*float64(currentStep)/float64(totalSteps)
+		lng := startLng + (endLng-startLng)*float64(currentStep)/float64(totalSteps)
+
+		req := &trackingpb.DriverLocation{
+			Id:        driverID,
+			Lat:       lat,
+			Lng:       lng,
+			CompanyId: "beu",
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+		_, err := client.PublishLocation(ctx, req)
+		cancel()
+
+		if err != nil {
+			log.Printf("Driver %s lost connection: %v", driverID, err)
+			return
+		}
+
+		currentStep = (currentStep + 1) % totalSteps
+		time.Sleep(time.Second * 2)
+	}
+}
+
 func main() {
 	flag.Usage = func() {
 		io.WriteString(os.Stderr, `Websockets client generator Example usage: ./client -ip=127.0.0.1 -n=1000`)
@@ -82,7 +128,11 @@ func main() {
 	for i := 1; i <= *numClients; i++ {
 		wg.Add(1)
 		driverID := fmt.Sprintf("driver_%d", i)
-		go startDriver(driverID, *ip, *lat, *lng, &wg)
+		if *mode == "grpc" {
+			go startGrpcDriver(driverID, *ip, *lat, *lng, &wg)
+		} else {
+			go startDriver(driverID, *ip, *lat, *lng, &wg)
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	wg.Wait()
