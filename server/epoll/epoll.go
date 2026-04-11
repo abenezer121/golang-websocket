@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fastsocket/core"
 	"fastsocket/config"
 	redis2 "fastsocket/external/redis"
 	"fastsocket/models"
@@ -37,13 +38,32 @@ type Epoll struct {
 	// roga    core.Roga
 
 	// notify map
-	NotifyMap           map[string][]*websocket.Conn
+	NotifyMap           map[string][]core.Subscriber
 	NotifyMapMutex      *sync.RWMutex
 	DriverTrackMap      map[*websocket.Conn]string
 	DriverTrackMapMutex *sync.RWMutex
 }
 
-func NewEpoll(workerChan chan models.EventJob, workerCount int, shutdownCtx context.Context, m *models.Metrics, rt, wt time.Duration, notifyMap map[string][]*websocket.Conn, notifyMapMutex *sync.RWMutex, rd *redis.Client, driverTrackMap map[*websocket.Conn]string, driverTrackMapMutex *sync.RWMutex) (*Epoll, error) {
+type WSSubscriber struct {
+	conn *websocket.Conn
+	ep   *Epoll
+}
+
+func (s *WSSubscriber) Send(msg []byte) error {
+	if s == nil || s.conn == nil || s.ep == nil {
+		return fmt.Errorf("websocket subscriber is not initialized")
+	}
+	return s.ep.writeText(s.conn, msg)
+}
+
+func (s *WSSubscriber) Close() error {
+	return s.conn.Close()
+}
+
+//compile time check  
+var _ core.Subscriber = (*WSSubscriber)(nil)
+
+func NewEpoll(workerChan chan models.EventJob, workerCount int, shutdownCtx context.Context, m *models.Metrics, rt, wt time.Duration, notifyMap map[string][]core.Subscriber, notifyMapMutex *sync.RWMutex, rd *redis.Client, driverTrackMap map[*websocket.Conn]string, driverTrackMapMutex *sync.RWMutex) (*Epoll, error) {
 	fd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		return nil, fmt.Errorf("epoll_create1: %w", err)
@@ -79,58 +99,6 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64, compan
 	nowUnixStr := strconv.FormatInt(now.Unix(), 10)
 
 	pipe := ep.redis.Pipeline()
-	ep.NotifyMapMutex.RLock()
-	conns, ok := ep.NotifyMap[workerId]
-	connsCopy := append([]*websocket.Conn(nil), conns...)
-	ep.NotifyMapMutex.RUnlock()
-
-	if ok {
-		broken := make(map[*websocket.Conn]struct{})
-		update := models.LocationUpdate{
-			WorkerID:  workerId,
-			Latitude:  lat,
-			Longitude: lng,
-			Timestamp: nowStr,
-			UnixTime:  nowUnixStr,
-			CompanyId: companyId,
-		}
-
-		response := models.SocketResponse{
-			Command:    "track",
-			DriverData: update,
-		}
-
-		msg, err := json.Marshal(response)
-		if err != nil {
-			return fmt.Errorf("json marshal error: %w", err)
-		}
-
-		for _, conn := range connsCopy {
-			err := ep.writeText(conn, msg)
-			if err != nil {
-				log.Printf("Failed to write to connection for worker %s: %v", workerId, err)
-				broken[conn] = struct{}{}
-			}
-		}
-		// clean up broken connections
-		if len(broken) > 0 {
-			ep.NotifyMapMutex.Lock()
-			current := ep.NotifyMap[workerId]
-			alive := make([]*websocket.Conn, 0, len(current))
-			for _, conn := range current {
-				if _, isBroken := broken[conn]; !isBroken {
-					alive = append(alive, conn)
-				}
-			}
-
-			if len(alive) > 0 {
-				ep.NotifyMap[workerId] = alive
-			} else {
-				delete(ep.NotifyMap, workerId)
-			}
-			ep.NotifyMapMutex.Unlock()
-		}
-	}
 	// update workers geo location
 	pipe.GeoAdd(ctx, config.WorkerLocationSet, &redis.GeoLocation{
 		Name:      workerId,
@@ -197,7 +165,64 @@ func (ep *Epoll) UpdateWorkersLocation(workerId string, lat, lng float64, compan
 		log.Printf("Error executing Redis pipeline for UpdateWorkersLocation (Worker: %s): %v\n", workerId, err)
 		return fmt.Errorf("redis pipeline execution failed: %w", err)
 	}
-	return err
+
+	update := models.LocationUpdate{
+		WorkerID:  workerId,
+		Latitude:  lat,
+		Longitude: lng,
+		Timestamp: nowStr,
+		UnixTime:  nowUnixStr,
+		CompanyId: companyId,
+	}
+
+	response := models.SocketResponse{
+		Command:    "track",
+		DriverData: update,
+	}
+
+	msg, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("json marshal error: %w", err)
+	}
+
+	ep.NotifyMapMutex.RLock()
+	subs := ep.NotifyMap[workerId]
+	subsCopy := append([]core.Subscriber(nil), subs...)
+	ep.NotifyMapMutex.RUnlock()
+
+	if len(subsCopy) == 0 {
+		return nil
+	}
+
+	broken := make(map[core.Subscriber]struct{})
+	for _, sub := range subsCopy {
+		if err := sub.Send(msg); err != nil {
+			log.Printf("Failed to write to connection for worker %s: %v", workerId, err)
+			broken[sub] = struct{}{}
+		}
+	}
+
+	if len(broken) == 0 {
+		return nil
+	}
+
+	ep.NotifyMapMutex.Lock()
+	current := ep.NotifyMap[workerId]
+	alive := make([]core.Subscriber, 0, len(current))
+	for _, sub := range current {
+		if _, isBroken := broken[sub]; !isBroken {
+			alive = append(alive, sub)
+		}
+	}
+
+	if len(alive) > 0 {
+		ep.NotifyMap[workerId] = alive
+	} else {
+		delete(ep.NotifyMap, workerId)
+	}
+	ep.NotifyMapMutex.Unlock()
+
+	return nil
 
 }
 
@@ -234,7 +259,7 @@ func (ep *Epoll) Add(conn *websocket.Conn) error {
 	ep.ConnWriteMu.Store(conn, &sync.Mutex{})
 	count := ep.Metrics.CurrentConnections.Add(1)
 	ep.Metrics.TotalConnections.Add(1)
-	log.Printf("New connection: Total count %d\n", count)
+	log.Printf("EPOLL ADD: fd=%d remote=%s total=%d", fd, conn.RemoteAddr(), count)
 	if ep.ReadTimeout > 0 {
 		if err := conn.SetReadDeadline(time.Now().Add(ep.ReadTimeout)); err != nil {
 			log.Printf("WARN: Failed to set initial read deadline for FD %d: %v", fd, err)
@@ -299,10 +324,14 @@ func (ep *Epoll) cleanupConnTracking(conn *websocket.Conn) {
 
 	ep.NotifyMapMutex.Lock()
 	for driverID, watchers := range ep.NotifyMap {
-		alive := make([]*websocket.Conn, 0, len(watchers))
-		for _, watcherConn := range watchers {
-			if watcherConn != conn {
-				alive = append(alive, watcherConn)
+		alive := make([]core.Subscriber, 0, len(watchers))
+		for _, sub := range watchers {
+			if ws, ok := sub.(*WSSubscriber); ok {
+				if ws.conn != conn {
+					alive = append(alive, sub)
+				}
+			} else {
+				alive = append(alive, sub)
 			}
 		}
 		if len(alive) == 0 {
@@ -453,6 +482,7 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 
 		log.Printf("DEBUG: HandleRead FD %d (%s): Attempting ReadMessage", fd, conn.RemoteAddr())
 		msgType, msg, err := conn.ReadMessage()
+		log.Printf("DEBUG: ReadMessage returned FD %d (%s): msgType=%d err=%v payload=%s", fd, conn.RemoteAddr(), msgType, err, string(msg))
 
 		if err != nil {
 
@@ -499,6 +529,7 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 
 			fmt.Printf("Received worker data from FD %d (%s): %+v\n", fd, conn.RemoteAddr(), worker)
 			if worker.CommandType != nil {
+				log.Printf("WATCHER command received from %s on fd=%d: raw=%s decoded=%+v", conn.RemoteAddr(), fd, string(msg), worker)
 				ep.HandleWatcherMessage(worker, conn)
 			} else {
 				if worker.Lat == nil || worker.Lng == nil {
@@ -545,13 +576,14 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 }
 
 func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket.Conn) {
+	log.Printf("WATCHER dispatch: remote=%s command=%s", conn.RemoteAddr(), *decodedMsg.CommandType)
 
 	switch *decodedMsg.CommandType {
 	case "get-bbox":
 		log.Printf("INFO: Handling 'get-bbox' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
 		// Validate required fields for get-bbox.
 		if decodedMsg.MinLat == nil || decodedMsg.MinLng == nil || decodedMsg.MaxLat == nil || decodedMsg.MaxLng == nil {
-			log.Printf("WARN: 'get-bbox' command from %s missing required coordinates. Message: %s", conn.RemoteAddr(), decodedMsg)
+			log.Printf("WARN: 'get-bbox' command from %s missing required coordinates. Message: %+v", conn.RemoteAddr(), decodedMsg)
 			errMsg := []byte(`{"error": "get-bbox command requires min_lat, min_lng, max_lat, max_lng"}`)
 			if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 				log.Printf("ERROR: Failed to send coordinate error message to %s: %v", conn.RemoteAddr(), writeErr)
@@ -589,7 +621,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		log.Printf("INFO: Handling 'get-drivers' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
 		// Validate required fields for get-drivers.
 		if decodedMsg.Page == nil {
-			log.Printf("WARN: 'get-drivers' command from %s missing page number. Message: %s", conn.RemoteAddr(), decodedMsg)
+			log.Printf("WARN: 'get-drivers' command from %s missing page number. Message: %+v", conn.RemoteAddr(), decodedMsg)
 			errMsg := []byte(`{"error": "get-drivers command requires a page number"}`)
 			if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 				log.Printf("ERROR: Failed to send page number error message to %s: %v", conn.RemoteAddr(), writeErr)
@@ -626,7 +658,7 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		log.Printf("INFO: Handling 'track-driver' from %s. Data: %+v", conn.RemoteAddr(), decodedMsg)
 		// Validate required fields for track-driver.
 		if decodedMsg.DriverId == nil || *decodedMsg.DriverId == "" {
-			log.Printf("WARN: 'track-driver' command from %s missing valid driver_id. Message: %s", conn.RemoteAddr(), decodedMsg)
+			log.Printf("WARN: 'track-driver' command from %s missing valid driver_id. Message: %+v", conn.RemoteAddr(), decodedMsg)
 			errMsg := []byte(`{"error": "track-driver command requires a valid driver_id"}`)
 			if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 				log.Printf("ERROR: Failed to send driver_id validation error message to %s: %v", conn.RemoteAddr(), writeErr)
@@ -641,10 +673,15 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		if oldDriver, tracked := ep.DriverTrackMap[conn]; tracked && oldDriver != newDriverToTrack {
 			ep.NotifyMapMutex.Lock()
 			watchers := ep.NotifyMap[oldDriver]
-			filtered := make([]*websocket.Conn, 0, len(watchers))
-			for _, c := range watchers {
-				if c != conn {
-					filtered = append(filtered, c)
+			filtered := make([]core.Subscriber, 0, len(watchers))
+
+			for _, sub := range watchers {
+				if ws, ok := sub.(*WSSubscriber); ok {
+					if ws.conn != conn {
+						filtered = append(filtered, sub)
+					}
+				} else {
+					filtered = append(filtered, sub)
 				}
 			}
 			if len(filtered) == 0 {
@@ -659,13 +696,15 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		watchers := ep.NotifyMap[newDriverToTrack]
 		alreadyExists := false
 		for _, watcher := range watchers {
-			if watcher == conn {
-				alreadyExists = true
-				break
+			if ws, ok := watcher.(*WSSubscriber); ok {
+				if ws.conn == conn {
+					alreadyExists = true
+					break
+				}
 			}
 		}
 		if !alreadyExists {
-			ep.NotifyMap[newDriverToTrack] = append(ep.NotifyMap[newDriverToTrack], conn)
+			ep.NotifyMap[newDriverToTrack] = append(ep.NotifyMap[newDriverToTrack], &WSSubscriber{conn: conn, ep: ep})
 		}
 		ep.NotifyMapMutex.Unlock()
 
@@ -680,8 +719,8 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 		}
 
 	default:
-		log.Printf("WARN: Unknown command_type '%s' from %s. Message: %s", decodedMsg.CommandType, conn.RemoteAddr(), decodedMsg)
-		errMsg := []byte(fmt.Sprintf(`{"error": "Unknown command_type: %s"}`, decodedMsg.CommandType))
+		log.Printf("WARN: Unknown command_type '%v' from %s. Message: %+v", decodedMsg.CommandType, conn.RemoteAddr(), decodedMsg)
+		errMsg := []byte(fmt.Sprintf(`{"error": "Unknown command_type: %v"}`, decodedMsg.CommandType))
 		if writeErr := ep.writeText(conn, errMsg); writeErr != nil {
 			log.Printf("ERROR: Failed to send unknown command error message to %s: %v", conn.RemoteAddr(), writeErr)
 			break
