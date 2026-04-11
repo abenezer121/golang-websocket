@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SSE Updates</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  >
+</head>
+<body>
+  <main class="app-shell">
+    <section class="hero">
+      <div class="brand-row">
+        <div class="brand-mark">
+          <img src="/assets/logo.svg" alt="Company logo">
+        </div>
+        <div class="brand-copy">
+          <p class="eyebrow">Fleet Monitoring</p>
+          <h1>Live Driver Tracking</h1>
+          <p class="subtitle">Connect to a driver ID and follow location updates on a branded realtime operations map.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel controls-panel">
+      <form id="connect-form" class="controls">
+        <label class="field">
+          <span>Driver ID</span>
+          <input id="driver-id" name="driver_id" type="text" placeholder="driver-123" required>
+        </label>
+        <div class="actions">
+          <button type="submit" id="connect-btn">Connect</button>
+          <button type="button" id="disconnect-btn" class="secondary">Disconnect</button>
+          <button type="button" id="clear-btn" class="ghost">Clear</button>
+        </div>
+      </form>
+      <div class="status-row">
+        <span class="status-label">Status</span>
+        <span id="status-badge" class="status-badge idle">Idle</span>
+      </div>
+      <p class="hint">Live feed endpoint: <code>/sse?driver_id=&lt;your-driver-id&gt;</code></p>
+    </section>
+
+    <section class="panel feed-panel">
+      <div class="feed-header">
+        <h2>Live Map</h2>
+        <span id="event-count" class="event-count">0 events</span>
+      </div>
+      <div id="map" class="map-view" aria-label="Driver location map"></div>
+      <div id="latest-update" class="latest-update">
+        Waiting for the first coordinate update.
+      </div>
+      <div id="empty-state" class="empty-state">No events yet. Connect to start listening.</div>
+      <ul id="event-list" class="event-list" aria-live="polite"></ul>
+    </section>
+  </main>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="/app.js"></script>
+</body>
+</html>
