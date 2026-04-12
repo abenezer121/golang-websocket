@@ -10,10 +10,6 @@ import (
 	"fastsocket/tracker"
 	"fastsocket/util"
 	"flag"
-	"github.com/gorilla/websocket"
-	"github.com/redis/go-redis/v9"
-	"golang.org/x/sys/unix"
-	grpc "google.golang.org/grpc"
 	"log"
 	"net"
 	"net/http"
@@ -23,6 +19,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
+	"golang.org/x/sys/unix"
+	grpc "google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 var upgrader = websocket.Upgrader{
@@ -171,6 +173,7 @@ func main() {
 	}
 	grpcSrv := grpc.NewServer()
 	grpcapi.Register(grpcSrv, trackerSvc, serverGrpcMetrics)
+	reflection.Register(grpcSrv)
 
 	go func() {
 		log.Printf("Starting gRPC server on %s", *models.GRPCAddr)
