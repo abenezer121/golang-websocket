@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"github.com/redis/go-redis/v9"
 	"log"
+	"math"
+	"regexp"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -22,15 +25,16 @@ func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64)
 
 	centerLat := (minLat + maxLat) / 2
 	centerLng := (minLng + maxLng) / 2
-	height := maxLat - minLat
-	width := maxLng - minLng
+	heightKm := (maxLat - minLat) * 110.574
+	widthKm := (maxLng - minLng) * (111.320 * math.Cos(centerLat*math.Pi/180))
 
 	searchQuery := &redis.GeoSearchLocationQuery{
 		GeoSearchQuery: redis.GeoSearchQuery{
 			Longitude: centerLng,
 			Latitude:  centerLat,
-			BoxWidth:  width,
-			BoxHeight: height,
+			BoxWidth:  widthKm,
+			BoxHeight: heightKm,
+			BoxUnit:   "km",
 
 			Count: 1000,
 		},
@@ -82,10 +86,7 @@ func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64)
 			log.Printf("Error unmarshalling worker detail for %s: %v\n", workerIdsInBox[i], err)
 			continue
 		}
-		if *worker.Active {
-
-			workers = append(workers, worker)
-		}
+		workers = append(workers, worker)
 	}
 
 	return workers, nil
@@ -112,7 +113,9 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Comm
 		return []models.Command{}, 0, nil
 	}
 
-	sort.Strings(allWorkerIds)
+	sort.SliceStable(allWorkerIds, func(i, j int) bool {
+		return compareWorkerIDs(allWorkerIds[i], allWorkerIds[j]) < 0
+	})
 
 	start := (page - 1) * pageSize
 	if start >= totalWorkers {
@@ -160,7 +163,12 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Comm
 		}
 
 		// Parse the UpdatedAt string into a time.Time object
-		updatedAt, err := time.Parse(time.RFC3339, *worker.UpdatedAt) // Adjust layout based on your actual format
+		if worker.UpdatedAt == nil || worker.Active == nil {
+			workers = append(workers, worker)
+			continue
+		}
+
+		updatedAt, err := time.Parse(time.RFC3339, *worker.UpdatedAt)
 		if err != nil {
 			log.Printf("Error parsing UpdatedAt for worker %s: %v\n", paginatedWorkerIds[i], err)
 			continue
@@ -187,6 +195,50 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Comm
 	}
 
 	return workers, totalWorkers, nil
+}
+
+var workerIDSuffixPattern = regexp.MustCompile(`^(.+?)_(\d+)$`)
+
+func compareWorkerIDs(left, right string) int {
+	leftPrefix, leftNumeric, leftIsNumeric := parseWorkerID(left)
+	rightPrefix, rightNumeric, rightIsNumeric := parseWorkerID(right)
+
+	if leftPrefix != rightPrefix {
+		if leftPrefix < rightPrefix {
+			return -1
+		}
+		return 1
+	}
+
+	if leftIsNumeric && rightIsNumeric {
+		if leftNumeric < rightNumeric {
+			return -1
+		}
+		if leftNumeric > rightNumeric {
+			return 1
+		}
+	}
+
+	if left < right {
+		return -1
+	}
+	if left > right {
+		return 1
+	}
+	return 0
+}
+
+func parseWorkerID(value string) (prefix string, numeric int, isNumeric bool) {
+	matches := workerIDSuffixPattern.FindStringSubmatch(value)
+	if len(matches) != 3 {
+		return value, 0, false
+	}
+
+	numeric, err := strconv.Atoi(matches[2])
+	if err != nil {
+		return value, 0, false
+	}
+	return matches[1], numeric, true
 }
 
 func updateInactiveWorkersInRedis(ctx context.Context, rd *redis.Client, workers map[string]models.Command) error {

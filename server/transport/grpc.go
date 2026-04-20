@@ -51,14 +51,15 @@ func (c *GRPCWatcherConnection) Send(payload []byte) error {
 		Error:   envelope.Error,
 		Status:  envelope.Status,
 	}
-	if envelope.DriverData.WorkerID != "" {
+	driverData := envelope.DriverData
+	if driverData.WorkerID != "" {
 		event.DriverData = &trackingpb.DriverLocationUpdate{
-			WorkerId:  envelope.DriverData.WorkerID,
-			Lat:       envelope.DriverData.Latitude,
-			Lng:       envelope.DriverData.Longitude,
-			Timestamp: envelope.DriverData.Timestamp,
-			CompanyId: envelope.DriverData.CompanyId,
-			UnixTime:  envelope.DriverData.UnixTime,
+			WorkerId:  driverData.WorkerID,
+			Lat:       driverData.Latitude,
+			Lng:       driverData.Longitude,
+			Timestamp: driverData.Timestamp,
+			CompanyId: driverData.CompanyId,
+			UnixTime:  driverData.UnixTime,
 		}
 	}
 

@@ -9,7 +9,7 @@ type LocationUpdate struct {
 	UnixTime  string  `json:"unix_time"`
 }
 type SocketResponse struct {
-	Command    string
-	Paginated  []Command
-	DriverData LocationUpdate
+	Command    string         `json:"command,omitempty"`
+	Paginated  []Command      `json:"paginated,omitempty"`
+	DriverData LocationUpdate `json:"driver_data,omitempty"`
 }
