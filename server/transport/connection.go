@@ -1,7 +1,8 @@
 package transport
+import "fastsocket/models"
 
 type ClientConnection interface {
-	Send([]byte) error
+	Send(models.WatcherResponse) error
 	Close() error
 	ID() string
 }

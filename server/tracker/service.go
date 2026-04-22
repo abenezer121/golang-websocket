@@ -25,11 +25,6 @@ type Service struct {
 	driverTrackMap map[string]string
 }
 
-type controlResponse struct {
-	Error  string `json:"error,omitempty"`
-	Status string `json:"status,omitempty"`
-}
-
 func NewService(rd *redis.Client) *Service {
 	return &Service{
 		redis:          rd,
@@ -67,19 +62,14 @@ func (s *Service) UpdateWorkerLocation(workerID string, lat, lng float64, compan
 			CompanyId: companyID,
 		}
 
-		response := models.SocketResponse{
-			Command:    "track",
-			DriverData: update,
-		}
-
-		msg, err := json.Marshal(response)
-		if err != nil {
-			return fmt.Errorf("json marshal error: %w", err)
+		response := models.WatcherResponse{
+			Command:      "track",
+			DriverUpdate: &update,
 		}
 
 		brokenIDs := make([]string, 0)
 		for _, conn := range subscribers {
-			if err := conn.Send(msg); err != nil {
+			if err := conn.Send(response); err != nil {
 				log.Printf("Failed to write to connection for worker %s: %v", workerID, err)
 				_ = conn.Close()
 				brokenIDs = append(brokenIDs, conn.ID())
@@ -168,32 +158,26 @@ func (s *Service) HandleWatcherCommand(decodedMsg models.Command, conn transport
 			return s.sendError(conn, "get-bbox command requires min_lat, min_lng, max_lat, max_lng")
 		}
 
-		drivers, err := s.GetDriversInBBox(*decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
+		response, err := s.bboxResponse(*decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
 		if err != nil {
 			log.Printf("ERROR: 'get-bbox' failed: %v", err)
 			return s.sendError(conn, "Failed to retrieve data for bounding box")
 		}
 
-		return s.sendJSON(conn, models.SocketResponse{
-			Command:   "get-bbox",
-			Paginated: drivers,
-		})
+		return s.send(conn, response)
 
 	case "get-drivers":
 		if decodedMsg.Page == nil {
 			return s.sendError(conn, "get-drivers command requires a page number")
 		}
 
-		drivers, _, err := s.GetDrivers(*decodedMsg.Page, 100)
+		response, err := s.driversResponse(*decodedMsg.Page, 100)
 		if err != nil {
 			log.Printf("ERROR: 'get-drivers' failed: %v", err)
 			return s.sendError(conn, "Failed to retrieve drivers list")
 		}
 
-		return s.sendJSON(conn, models.SocketResponse{
-			Command:   "get-drivers",
-			Paginated: drivers,
-		})
+		return s.send(conn, response)
 
 	case "track-driver":
 		if decodedMsg.DriverId == nil || *decodedMsg.DriverId == "" {
@@ -213,6 +197,30 @@ func (s *Service) GetDrivers(page, pageSize int) ([]models.Command, int, error) 
 
 func (s *Service) GetDriversInBBox(minLat, minLng, maxLat, maxLng float64) ([]models.Command, error) {
 	return redisstore.FindWorkersInBBox(s.redis, minLat, minLng, maxLat, maxLng)
+}
+
+func (s *Service) bboxResponse(minLat, minLng, maxLat, maxLng float64) (models.WatcherResponse, error) {
+	drivers, err := s.GetDriversInBBox(minLat, minLng, maxLat, maxLng)
+	if err != nil {
+		return models.WatcherResponse{}, err
+	}
+
+	return models.WatcherResponse{
+		Command: "get-bbox",
+		Drivers: drivers,
+	}, nil
+}
+
+func (s *Service) driversResponse(page, pageSize int) (models.WatcherResponse, error) {
+	drivers, _, err := s.GetDrivers(page, pageSize)
+	if err != nil {
+		return models.WatcherResponse{}, err
+	}
+
+	return models.WatcherResponse{
+		Command: "get-drivers",
+		Drivers: drivers,
+	}, nil
 }
 
 func (s *Service) TrackDriver(conn transport.ClientConnection, driverID string) error {
@@ -304,13 +312,8 @@ func (s *Service) removeSubscribers(driverID string, connIDs []string) {
 	}
 }
 
-func (s *Service) sendJSON(conn transport.ClientConnection, payload any) error {
-	msg, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	if err := conn.Send(msg); err != nil {
+func (s *Service) send(conn transport.ClientConnection, payload models.WatcherResponse) error {
+	if err := conn.Send(payload); err != nil {
 		_ = conn.Close()
 		return err
 	}
@@ -319,9 +322,9 @@ func (s *Service) sendJSON(conn transport.ClientConnection, payload any) error {
 }
 
 func (s *Service) sendError(conn transport.ClientConnection, message string) error {
-	return s.sendJSON(conn, controlResponse{Error: message})
+	return s.send(conn, models.WatcherResponse{Error: message})
 }
 
 func (s *Service) sendStatus(conn transport.ClientConnection, message string) error {
-	return s.sendJSON(conn, controlResponse{Status: message})
+	return s.send(conn, models.WatcherResponse{Status: message})
 }

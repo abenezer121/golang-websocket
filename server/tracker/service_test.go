@@ -1,19 +1,17 @@
 package tracker
 
 import (
-	"encoding/json"
 	"fastsocket/models"
 	"testing"
 )
 
 type fakeConn struct {
 	id       string
-	messages [][]byte
+	messages []models.WatcherResponse
 }
 
-func (f *fakeConn) Send(payload []byte) error {
-	copyPayload := append([]byte(nil), payload...)
-	f.messages = append(f.messages, copyPayload)
+func (f *fakeConn) Send(payload models.WatcherResponse) error {
+	f.messages = append(f.messages, payload)
 	return nil
 }
 
@@ -64,11 +62,7 @@ func TestHandleWatcherCommandTrackDriverSendsAck(t *testing.T) {
 		t.Fatalf("expected 1 ack message, got %d", len(conn.messages))
 	}
 
-	var response map[string]string
-	if err := json.Unmarshal(conn.messages[0], &response); err != nil {
-		t.Fatalf("decode ack: %v", err)
-	}
-	if got := response["status"]; got != "now tracking driver_id driver-42" {
+	if got := conn.messages[0].Status; got != "now tracking driver_id driver-42" {
 		t.Fatalf("unexpected ack status %q", got)
 	}
 }

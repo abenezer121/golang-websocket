@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"encoding/json"
 	"errors"
 	"fastsocket/grpc/trackingpb"
 	"fastsocket/models"
@@ -23,14 +22,6 @@ type GRPCWatcherConnection struct {
 	mu     sync.Mutex
 }
 
-type grpcEnvelope struct {
-	Command    string                `json:"command,omitempty"`
-	Paginated  []models.Command      `json:"paginated,omitempty"`
-	DriverData models.LocationUpdate `json:"driver_data,omitempty"`
-	Error      string                `json:"error,omitempty"`
-	Status     string                `json:"status,omitempty"`
-}
-
 func NewGRPCWatcherConnection(stream GRPCWatcherStream) *GRPCWatcherConnection {
 	id := fmt.Sprintf("grpc:%d", grpcConnectionCounter.Add(1))
 	return &GRPCWatcherConnection{
@@ -39,27 +30,21 @@ func NewGRPCWatcherConnection(stream GRPCWatcherStream) *GRPCWatcherConnection {
 	}
 }
 
-func (c *GRPCWatcherConnection) Send(payload []byte) error {
-	var envelope grpcEnvelope
-	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return err
-	}
-
+func (c *GRPCWatcherConnection) Send(payload models.WatcherResponse) error {
 	event := &trackingpb.WatcherEvent{
-		Command: envelope.Command,
-		Drivers: DriversToProto(envelope.Paginated),
-		Error:   envelope.Error,
-		Status:  envelope.Status,
+		Command: payload.Command,
+		Drivers: DriversToProto(payload.Drivers),
+		Error:   payload.Error,
+		Status:  payload.Status,
 	}
-	driverData := envelope.DriverData
-	if driverData.WorkerID != "" {
+	if payload.DriverUpdate != nil {
 		event.DriverData = &trackingpb.DriverLocationUpdate{
-			WorkerId:  driverData.WorkerID,
-			Lat:       driverData.Latitude,
-			Lng:       driverData.Longitude,
-			Timestamp: driverData.Timestamp,
-			CompanyId: driverData.CompanyId,
-			UnixTime:  driverData.UnixTime,
+			WorkerId:  payload.DriverUpdate.WorkerID,
+			Lat:       payload.DriverUpdate.Latitude,
+			Lng:       payload.DriverUpdate.Longitude,
+			Timestamp: payload.DriverUpdate.Timestamp,
+			CompanyId: payload.DriverUpdate.CompanyId,
+			UnixTime:  payload.DriverUpdate.UnixTime,
 		}
 	}
 

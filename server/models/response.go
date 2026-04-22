@@ -8,8 +8,13 @@ type LocationUpdate struct {
 	CompanyId string  `json:"company_id"`
 	UnixTime  string  `json:"unix_time"`
 }
-type SocketResponse struct {
-	Command    string         `json:"command,omitempty"`
-	Paginated  []Command      `json:"paginated,omitempty"`
-	DriverData LocationUpdate `json:"driver_data,omitempty"`
+
+/* WatcherResponse is the transport independent response shape emitted by the service layer.
+and Each transport is responsible for encoding it into its own wire format (protobuf and json). */
+type WatcherResponse struct {
+	Command      string
+	Drivers      []Command
+	DriverUpdate *LocationUpdate
+	Error        string
+	Status       string
 }
