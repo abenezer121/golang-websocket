@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fastsocket/epoll"
 	"fastsocket/handlers"
@@ -11,13 +12,13 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sys/unix"
+	"io/fs"
 	"log"
-	"net"
+	// "net"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -27,14 +28,17 @@ var upgrader = websocket.Upgrader{
 		return true
 	},
 }
+
+//go:embed web/*
+var webAssets embed.FS
+
 // to monitor the system
 func monitorSystem() {
-    for {
-        log.Printf("[MONITOR] Active Goroutines: %d", runtime.NumGoroutine())
-        time.Sleep(2*time.Second) 
-    }
+	for {
+		log.Printf("[MONITOR] Active Goroutines: %d", runtime.NumGoroutine())
+		time.Sleep(2 * time.Second)
+	}
 }
-
 
 func main() {
 	go monitorSystem()
@@ -56,16 +60,12 @@ func main() {
 	appCtx, cancelApp := context.WithCancel(context.Background())
 	defer cancelApp()
 
-	notifyMap := make(map[string][]*websocket.Conn)
-	driverTrackMap := make(map[*websocket.Conn]string)
-	driverTrackMapMutex := &sync.RWMutex{}
-	notifyMapMutex := &sync.RWMutex{}
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
 	})
 
-	epollInstance, err := epoll.NewEpoll(jobChan, numWorkers,appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb, driverTrackMap, driverTrackMapMutex)
+	epollInstance, err := epoll.NewEpoll(jobChan, numWorkers, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, rdb)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}
@@ -78,17 +78,35 @@ func main() {
 		}
 	}()
 
-	workerWg := &sync.WaitGroup{}
-
 	// Configure HTTP Server for WebSocket endpoint
 	mux := http.NewServeMux()
+	webFS, err := fs.Sub(webAssets, "web")
+	if err != nil {
+		log.Fatalf("FATAL: Failed to initialize embedded web assets: %v", err)
+	}
+	webHandler := http.FileServer(http.FS(webFS))
+	mux.Handle("/", http.TimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		webHandler.ServeHTTP(w, r)
+	}), 10*time.Second, "request timed out"))
+
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("ROUTE HIT: driver websocket path=%s remote=%s", r.URL.Path, r.RemoteAddr)
 		handlers.WsHander(upgrader, w, r, epollInstance)
 	})
 
 	mux.HandleFunc("/activity", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("ROUTE HIT: watcher websocket path=%s remote=%s", r.URL.Path, r.RemoteAddr)
 		handlers.ControlHandler(upgrader, w, r, epollInstance)
 	})
+	// sse endpoint
+	mux.HandleFunc("/sse", handlers.SSEHandler(epollInstance))
+	// Http endpoint
+	mux.Handle("/driver/update", http.TimeoutHandler(
+		handlers.HandleDriverUpdateHTTP(epollInstance),
+		10*time.Second,
+		`{"status":"error","message":"driver update request timed out"}`,
+	))
 
 	if *models.MetricsAddr != "" {
 		metricsMux := http.NewServeMux()
@@ -123,8 +141,10 @@ func main() {
 		Addr:    *models.Addr,
 		Handler: mux,
 
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		ReadTimeout: 10 * time.Second,
+		// Streaming routes on this server require an unlimited WriteTimeout.
+		// Current non-streaming handlers are wrapped in http.TimeoutHandler.
+		WriteTimeout: 0 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -160,18 +180,21 @@ func main() {
 	epollInstance.ShutdownWg.Wait()
 	log.Println("Epoll loop finished.")
 
+	log.Println("Waiting for workers to finish...")
+	epollInstance.WorkerWg.Wait()
+	log.Println("All workers finished.")
+
 	log.Println("Closing worker job channel...")
 	close(jobChan)
 
-	log.Println("Waiting for workers to finish...")
-	workerWg.Wait()
-	log.Println("All workers finished.")
+	log.Println("Closing SSE subscribers...")
+	epollInstance.UnregisterAllSSESubscribers()
 
 	log.Println("Closing any remaining active connections...")
 	closedCount := 0
 	epollInstance.Connections.Range(func(key, value interface{}) bool {
 		fd := key.(int)
-		conn := value.(net.Conn)
+		conn := value.(*websocket.Conn)
 		log.Printf("Closing connection FD %d from final cleanup.", fd)
 		conn.Close()
 		closedCount++

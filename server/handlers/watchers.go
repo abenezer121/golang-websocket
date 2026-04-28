@@ -13,8 +13,8 @@ import (
 )
 
 func ControlHandler(upgrader websocket.Upgrader, w http.ResponseWriter, r *http.Request, ep *epoll.Epoll) {
-	// Upgrade the HTTP connection to a WebSocket connection. This should happen ONCE.
-	log.Printf("hello htere")
+	log.Printf("WATCHER handler hit: path=%s remote=%s", r.URL.Path, r.RemoteAddr)
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
@@ -30,6 +30,8 @@ func ControlHandler(upgrader websocket.Upgrader, w http.ResponseWriter, r *http.
 		return
 	}
 
+	log.Printf("WATCHER upgrade success: remote=%s local=%s", conn.RemoteAddr(), conn.LocalAddr())
+
 	if err := ep.Add(conn); err != nil {
 		log.Printf("ERROR: Failed to add WebSocket connection (FD potentially obtained) to epoll: %v", err)
 		ep.Metrics.UpgradesFailed.Add(1)
@@ -37,6 +39,7 @@ func ControlHandler(upgrader websocket.Upgrader, w http.ResponseWriter, r *http.
 		return
 	}
 
+	log.Printf("WATCHER connection registered with epoll: remote=%s", conn.RemoteAddr())
 	ep.Metrics.UpgradesSuccess.Add(1)
 
 }

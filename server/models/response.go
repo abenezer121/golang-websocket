@@ -8,8 +8,12 @@ type LocationUpdate struct {
 	CompanyId string  `json:"company_id"`
 	UnixTime  string  `json:"unix_time"`
 }
+
 type SocketResponse struct {
-	Command    string
-	Paginated  []Command
-	DriverData LocationUpdate
+	Command    string          `json:"command"`
+	Status     string          `json:"status,omitempty"`
+	Message    string          `json:"message,omitempty"`
+	DriverIDs  []string        `json:"driver_ids,omitempty"`
+	Paginated  []Command       `json:"paginated,omitempty"`
+	DriverData *LocationUpdate `json:"driver_data,omitempty"`
 }

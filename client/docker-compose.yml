@@ -7,6 +7,6 @@ services:
     network_mode: "bridge"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: ["/app/client", "-ip=host.docker.internal", "-n=5000"]
+    command: ["/app/client", "-ip=host.docker.internal", "-n=10000"]
 # "-conn=100", "-ip=9.141.20.46"
     
