@@ -173,11 +173,16 @@ function updateLocationNote(message) {
 }
 
 function buildBBox(lat, lng) {
+  const minLat = Math.max(-90, lat - BBOX_RADIUS_LAT);
+  const minLng = Math.max(-180, lng - BBOX_RADIUS_LNG);
+  const maxLat = Math.min(90, lat + BBOX_RADIUS_LAT);
+  const maxLng = Math.min(180, lng + BBOX_RADIUS_LNG);
+
   return {
-    minLat: lat - BBOX_RADIUS_LAT,
-    minLng: lng - BBOX_RADIUS_LNG,
-    maxLat: lat + BBOX_RADIUS_LAT,
-    maxLng: lng + BBOX_RADIUS_LNG,
+    minLat,
+    minLng,
+    maxLat,
+    maxLng,
   };
 }
 
@@ -712,13 +717,14 @@ async function connectFromForm() {
     return;
   }
 
+  if (requestedDriverID) {
+    followSingleDriver(requestedDriverID, companyID);
+    return;
+  }
+
   try {
     const position = await ensureLocation();
     const bbox = buildBBox(position.lat, position.lng);
-    if (requestedDriverID) {
-      followSingleDriver(requestedDriverID, companyID);
-      return;
-    }
     connectStream({ companyID, bbox, driverIDs: [], mode: "nearby" });
   } catch (error) {
     setStatus("error", "Location unavailable");

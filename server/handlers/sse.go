@@ -76,7 +76,7 @@ func SSEHandler(ep *epoll.Epoll) http.HandlerFunc {
 		}
 
 		if err := ep.SendInitialSnapshot(registration); err != nil {
-			http.Error(w, "failed to load initial snapshot", http.StatusInternalServerError)
+			_ = sendSSEError(sub, "failed to load initial snapshot")
 			_ = sub.Close()
 			return
 		}
@@ -84,6 +84,18 @@ func SSEHandler(ep *epoll.Epoll) http.HandlerFunc {
 		<-r.Context().Done()
 		_ = sub.Close()
 	}
+}
+
+func sendSSEError(sub *sse.SSESubscriber, message string) error {
+	payload, err := json.Marshal(models.SocketResponse{
+		Command: "error",
+		Status:  "error",
+		Message: message,
+	})
+	if err != nil {
+		return err
+	}
+	return sub.Send(payload)
 }
 
 func parseSSEDriverIDs(r *http.Request) []string {

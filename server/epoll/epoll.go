@@ -546,8 +546,8 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 				}
 				ep.HandleWatcherMessage(worker, conn)
 			} else {
-				if worker.Lat == nil || worker.Lng == nil {
-					log.Printf("WARN: location update missing lat/lng on FD %d (%s)", fd, conn.RemoteAddr())
+				if err := validateLocationUpdateCommand(worker); err != nil {
+					log.Printf("WARN: invalid location update on FD %d (%s): %v", fd, conn.RemoteAddr(), err)
 					ep.Metrics.ProcessingErrors.Add(1)
 					continue
 				}
@@ -561,17 +561,21 @@ func (ep *Epoll) HandleRead(fd int, conn *websocket.Conn) {
 			ep.DeleteAndClose(fd, conn, "Received WebSocket close frame", true)
 			return
 		case websocket.PingMessage:
-			if err := conn.SetReadDeadline(time.Now().Add(ep.ReadTimeout)); err != nil {
-				log.Printf("WARN: HandleRead: Failed to reset read deadline after Ping for FD %d: %v. Closing.", fd, err)
-				ep.DeleteAndClose(fd, conn, "Failed to set read deadline post-ping", false)
-				return
+			if ep.ReadTimeout > 0 {
+				if err := conn.SetReadDeadline(time.Now().Add(ep.ReadTimeout)); err != nil {
+					log.Printf("WARN: HandleRead: Failed to reset read deadline after Ping for FD %d: %v. Closing.", fd, err)
+					ep.DeleteAndClose(fd, conn, "Failed to set read deadline post-ping", false)
+					return
+				}
 			}
 			continue
 		case websocket.PongMessage:
-			if err := conn.SetReadDeadline(time.Now().Add(ep.ReadTimeout)); err != nil {
-				log.Printf("WARN: HandleRead: Failed to reset read deadline after Pong for FD %d: %v. Closing.", fd, err)
-				ep.DeleteAndClose(fd, conn, "Failed to set read deadline post-pong", false)
-				return
+			if ep.ReadTimeout > 0 {
+				if err := conn.SetReadDeadline(time.Now().Add(ep.ReadTimeout)); err != nil {
+					log.Printf("WARN: HandleRead: Failed to reset read deadline after Pong for FD %d: %v. Closing.", fd, err)
+					ep.DeleteAndClose(fd, conn, "Failed to set read deadline post-pong", false)
+					return
+				}
 			}
 			continue
 		default:
@@ -679,6 +683,28 @@ func (ep *Epoll) HandleWatcherMessage(decodedMsg models.Command, conn *websocket
 	default:
 		_ = ep.writeJSONError(conn, fmt.Sprintf("Unknown command_type: %s", command))
 	}
+}
+
+func validateLocationUpdateCommand(cmd models.Command) error {
+	if cmd.Id == "" {
+		return fmt.Errorf("id is required")
+	}
+	if cmd.CompanyId == "" {
+		return fmt.Errorf("company_id is required")
+	}
+	if cmd.Lat == nil {
+		return fmt.Errorf("lat is required")
+	}
+	if cmd.Lng == nil {
+		return fmt.Errorf("lng is required")
+	}
+	if *cmd.Lat < -90 || *cmd.Lat > 90 {
+		return fmt.Errorf("lat out of range")
+	}
+	if *cmd.Lng < -180 || *cmd.Lng > 180 {
+		return fmt.Errorf("lng out of range")
+	}
+	return nil
 }
 
 func normalizeDriverIDs(cmd models.Command) []string {

@@ -153,98 +153,89 @@ func getAllWorkersPaginated(rd *redis.Client, page, pageSize int, companyID stri
 	}
 
 	sort.Strings(allWorkerIds)
-
-	detailsData, err := rd.HMGet(ctx, config.WorkerDetailsHash, allWorkerIds...).Result()
-	if err != nil {
-		log.Printf("Error fetching paginated worker details with HMGet: %v\n", err)
-		return nil, 0, fmt.Errorf("failed to fetch worker details for page %d: %w", page, err)
+	start := (page - 1) * pageSize
+	chunkSize := pageSize
+	if chunkSize < 100 {
+		chunkSize = 100
 	}
 
-	filteredWorkers := make([]models.Command, 0, len(allWorkerIds))
+	pageWorkers := make([]models.Command, 0, pageSize)
+	totalWorkers := 0
 	now := time.Now()
 	oneMinuteAgo := now.Add(-1 * time.Minute)
 	needsUpdate := make(map[string]models.Command)
 
-	for i, data := range detailsData {
-		if data == nil {
-			log.Printf("Details not found for paginated worker %s in %s\n", allWorkerIds[i], config.WorkerDetailsHash)
-			continue
+	for chunkStart := 0; chunkStart < len(allWorkerIds); chunkStart += chunkSize {
+		chunkEnd := chunkStart + chunkSize
+		if chunkEnd > len(allWorkerIds) {
+			chunkEnd = len(allWorkerIds)
 		}
 
-		detailStr, ok := data.(string)
-		if !ok {
-			log.Printf("Unexpected data type for worker %s detail: %T\n", allWorkerIds[i], data)
-			continue
-		}
-
-		var worker models.Command
-		if err := json.Unmarshal([]byte(detailStr), &worker); err != nil {
-			log.Printf("Error unmarshalling worker detail for %s: %v\n", allWorkerIds[i], err)
-			continue
-		}
-
-		// Parse the UpdatedAt string into a time.Time object
-		if worker.UpdatedAt == nil || worker.Active == nil {
-			continue
-		}
-
-		updatedAt, err := time.Parse(time.RFC3339, *worker.UpdatedAt)
+		chunkIDs := allWorkerIds[chunkStart:chunkEnd]
+		detailsData, err := rd.HMGet(ctx, config.WorkerDetailsHash, chunkIDs...).Result()
 		if err != nil {
-			log.Printf("Error parsing UpdatedAt for worker %s: %v\n", allWorkerIds[i], err)
-			continue
+			log.Printf("Error fetching paginated worker details with HMGet: %v\n", err)
+			return nil, 0, fmt.Errorf("failed to fetch worker details for page %d: %w", page, err)
 		}
 
-		// Check if the worker was updated more than 1 minute ago and is still marked as active
-		active := false
-		_updatedAt := fmt.Sprintf("%s", now.Format(time.RFC3339))
-		if updatedAt.Before(oneMinuteAgo) && *worker.Active {
-			worker.Active = &active
-			worker.UpdatedAt = &_updatedAt
-			needsUpdate[allWorkerIds[i]] = worker
-		}
-
-		if companyID != "" && worker.CompanyId != companyID {
-			continue
-		}
-
-		filteredWorkers = append(filteredWorkers, worker)
-	}
-
-	totalWorkers := len(filteredWorkers)
-	if totalWorkers == 0 {
-		if len(needsUpdate) > 0 {
-			if err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate); err != nil {
-				log.Printf("Error updating inactive workers in Redis: %v\n", err)
+		for i, data := range detailsData {
+			if data == nil {
+				log.Printf("Details not found for paginated worker %s in %s\n", chunkIDs[i], config.WorkerDetailsHash)
+				continue
 			}
+
+			detailStr, ok := data.(string)
+			if !ok {
+				log.Printf("Unexpected data type for worker %s detail: %T\n", chunkIDs[i], data)
+				continue
+			}
+
+			var worker models.Command
+			if err := json.Unmarshal([]byte(detailStr), &worker); err != nil {
+				log.Printf("Error unmarshalling worker detail for %s: %v\n", chunkIDs[i], err)
+				continue
+			}
+
+			if worker.UpdatedAt == nil || worker.Active == nil {
+				continue
+			}
+
+			updatedAt, err := time.Parse(time.RFC3339, *worker.UpdatedAt)
+			if err != nil {
+				log.Printf("Error parsing UpdatedAt for worker %s: %v\n", chunkIDs[i], err)
+				continue
+			}
+
+			active := false
+			updatedAtNow := now.Format(time.RFC3339)
+			if updatedAt.Before(oneMinuteAgo) && *worker.Active {
+				worker.Active = &active
+				worker.UpdatedAt = &updatedAtNow
+				needsUpdate[chunkIDs[i]] = worker
+			}
+
+			if companyID != "" && worker.CompanyId != companyID {
+				continue
+			}
+
+			if totalWorkers >= start && len(pageWorkers) < pageSize {
+				pageWorkers = append(pageWorkers, worker)
+			}
+			totalWorkers++
 		}
-		return []models.Command{}, 0, nil
 	}
 
-	start := (page - 1) * pageSize
+	if len(needsUpdate) > 0 {
+		if err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate); err != nil {
+			log.Printf("Error updating inactive workers in Redis: %v\n", err)
+		}
+	}
+
 	if start >= totalWorkers {
-		if len(needsUpdate) > 0 {
-			if err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate); err != nil {
-				log.Printf("Error updating inactive workers in Redis: %v\n", err)
-			}
-		}
 		return []models.Command{}, totalWorkers, nil
 	}
 
-	end := start + pageSize
-	if end > totalWorkers {
-		end = totalWorkers
-	}
-
-	workers := filteredWorkers[start:end]
-	if len(needsUpdate) > 0 {
-		err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate)
-		if err != nil {
-			log.Printf("Error updating inactive workers in Redis: %v\n", err)
-
-		}
-	}
-
-	return workers, totalWorkers, nil
+	return pageWorkers, totalWorkers, nil
 }
 
 func updateInactiveWorkersInRedis(ctx context.Context, rd *redis.Client, workers map[string]models.Command) error {

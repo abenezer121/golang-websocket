@@ -85,10 +85,10 @@ func main() {
 		log.Fatalf("FATAL: Failed to initialize embedded web assets: %v", err)
 	}
 	webHandler := http.FileServer(http.FS(webFS))
-	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", http.TimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		webHandler.ServeHTTP(w, r)
-	}))
+	}), 10*time.Second, "request timed out"))
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ROUTE HIT: driver websocket path=%s remote=%s", r.URL.Path, r.RemoteAddr)
@@ -142,7 +142,8 @@ func main() {
 		Handler: mux,
 
 		ReadTimeout: 10 * time.Second,
-		// WriteTimeout: 10 * time.Second,
+		// Streaming routes on this server require an unlimited WriteTimeout.
+		// Current non-streaming handlers are wrapped in http.TimeoutHandler.
 		WriteTimeout: 0 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
