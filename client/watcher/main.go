@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/url"
@@ -16,7 +17,8 @@ var (
 	ip       = flag.String("ip", "127.0.0.1", "server IP")
 	port     = flag.String("port", "8082", "server port")
 	path     = flag.String("path", "/activity", "websocket path for watcher commands")
-	command  = flag.String("command", "track-driver", "watcher command: track-driver|get-drivers|get-bbox")
+	command  = flag.String("command", "track-driver", "watcher command: track-driver|subscribe-driver|unsubscribe-driver|get-drivers|get-bbox|subscribe-bbox|update-bbox|clear-subscriptions")
+	company  = flag.String("company-id", "beu", "company ID used for filtered subscriptions")
 	driverID = flag.String("driver-id", "driver_1", "driver ID for track-driver")
 	page     = flag.Int("page", 1, "page number for get-drivers")
 	minLat   = flag.Float64("min-lat", 9.30, "minimum latitude for get-bbox")
@@ -25,35 +27,58 @@ var (
 	maxLng   = flag.Float64("max-lng", 39.30, "maximum longitude for get-bbox")
 )
 
-func buildWatcherMessage() map[string]interface{} {
+func buildWatcherMessage() (map[string]any, error) {
 	switch *command {
 	case "get-drivers":
-		return map[string]interface{}{
+		return map[string]any{
 			"command_type": "get-drivers",
+			"company_id":   *company,
 			"page":         *page,
-		}
+		}, nil
 	case "get-bbox":
-		return map[string]interface{}{
+		return map[string]any{
 			"command_type": "get-bbox",
+			"company_id":   *company,
 			"min_lat":      *minLat,
 			"min_lng":      *minLng,
 			"max_lat":      *maxLat,
 			"max_lng":      *maxLng,
-		}
-	default:
-		return map[string]interface{}{
-			"command_type": "track-driver",
+		}, nil
+	case "subscribe-bbox", "update-bbox":
+		return map[string]any{
+			"command_type": *command,
+			"company_id":   *company,
+			"min_lat":      *minLat,
+			"min_lng":      *minLng,
+			"max_lat":      *maxLat,
+			"max_lng":      *maxLng,
+		}, nil
+	case "track-driver", "subscribe-driver":
+		return map[string]any{
+			"command_type": *command,
+			"company_id":   *company,
 			"driver_id":    *driverID,
-		}
+		}, nil
+	case "unsubscribe-driver":
+		return map[string]any{
+			"command_type": "unsubscribe-driver",
+			"driver_id":    *driverID,
+		}, nil
+	case "clear-subscriptions":
+		return map[string]any{
+			"command_type": "clear-subscriptions",
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported -command %q", *command)
 	}
 }
 
 func main() {
 	flag.Usage = func() {
 		io.WriteString(os.Stderr, "Watcher simulator example usage:\n")
-		io.WriteString(os.Stderr, "  go run ./watcher -ip=127.0.0.1 -path=/activity -command=track-driver -driver-id=driver_1\n")
-		io.WriteString(os.Stderr, "  go run ./watcher -ip=127.0.0.1 -path=/activity -command=get-drivers -page=1\n")
-		io.WriteString(os.Stderr, "  go run ./watcher -ip=127.0.0.1 -path=/activity -command=get-bbox -min-lat=9.3 -min-lng=38.2 -max-lat=9.6 -max-lng=39.3\n")
+		io.WriteString(os.Stderr, "  go run ./watcher -ip=127.0.0.1 -path=/activity -command=track-driver -company-id=beu -driver-id=driver_1\n")
+		io.WriteString(os.Stderr, "  go run ./watcher -ip=127.0.0.1 -path=/activity -command=subscribe-bbox -company-id=beu -min-lat=9.3 -min-lng=38.2 -max-lat=9.6 -max-lng=39.3\n")
+		io.WriteString(os.Stderr, "  go run ./watcher -ip=127.0.0.1 -path=/activity -command=get-drivers -company-id=beu -page=1\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -66,7 +91,10 @@ func main() {
 	}
 	defer conn.Close()
 
-	msg := buildWatcherMessage()
+	msg, err := buildWatcherMessage()
+	if err != nil {
+		log.Fatal(err)
+	}
 	msgJSON, err := json.Marshal(msg)
 	if err != nil {
 		log.Fatalf("Watcher failed to marshal command: %v", err)
@@ -78,7 +106,7 @@ func main() {
 
 	log.Printf("Connected to %s and sent payload: %s", u.String(), string(msgJSON))
 
-	if *command != "track-driver" {
+	if *command != "track-driver" && *command != "subscribe-driver" && *command != "subscribe-bbox" && *command != "update-bbox" {
 		if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 			log.Fatalf("Watcher failed to set read deadline: %v", err)
 		}
@@ -92,7 +120,7 @@ func main() {
 
 		log.Printf("Received message type=%d payload=%s", messageType, string(payload))
 
-		if *command != "track-driver" {
+		if *command != "track-driver" && *command != "subscribe-driver" && *command != "subscribe-bbox" && *command != "update-bbox" {
 			return
 		}
 	}

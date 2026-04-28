@@ -13,8 +13,6 @@ import (
 )
 
 func ControlHandler(upgrader websocket.Upgrader, w http.ResponseWriter, r *http.Request, ep *epoll.Epoll) {
-	// Upgrade the HTTP connection to a WebSocket connection. This should happen ONCE.
-	// log.Printf("hello htere")
 	log.Printf("WATCHER handler hit: path=%s remote=%s", r.URL.Path, r.RemoteAddr)
 
 	conn, err := upgrader.Upgrade(w, r, nil)

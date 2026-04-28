@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"errors"
-	"fastsocket/core"
 	"fastsocket/epoll"
 	"fastsocket/handlers"
 	"fastsocket/models"
@@ -20,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -62,16 +60,12 @@ func main() {
 	appCtx, cancelApp := context.WithCancel(context.Background())
 	defer cancelApp()
 
-	notifyMap := make(map[string][]core.Subscriber)
-	driverTrackMap := make(map[*websocket.Conn]string)
-	driverTrackMapMutex := &sync.RWMutex{}
-	notifyMapMutex := &sync.RWMutex{}
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 		DB:   0,
 	})
 
-	epollInstance, err := epoll.NewEpoll(jobChan, numWorkers, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, notifyMap, notifyMapMutex, rdb, driverTrackMap, driverTrackMapMutex)
+	epollInstance, err := epoll.NewEpoll(jobChan, numWorkers, appCtx, serverMetrics, *models.ReadTimeout, *models.WriteTimeout, rdb)
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize epoll: %v", err)
 	}
@@ -84,15 +78,17 @@ func main() {
 		}
 	}()
 
-	workerWg := &sync.WaitGroup{}
-
 	// Configure HTTP Server for WebSocket endpoint
 	mux := http.NewServeMux()
 	webFS, err := fs.Sub(webAssets, "web")
 	if err != nil {
 		log.Fatalf("FATAL: Failed to initialize embedded web assets: %v", err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(webFS)))
+	webHandler := http.FileServer(http.FS(webFS))
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		webHandler.ServeHTTP(w, r)
+	}))
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ROUTE HIT: driver websocket path=%s remote=%s", r.URL.Path, r.RemoteAddr)
@@ -106,7 +102,11 @@ func main() {
 	// sse endpoint
 	mux.HandleFunc("/sse", handlers.SSEHandler(epollInstance))
 	// Http endpoint
-	mux.HandleFunc("/driver/update", handlers.HandleDriverUpdateHTTP(epollInstance))
+	mux.Handle("/driver/update", http.TimeoutHandler(
+		handlers.HandleDriverUpdateHTTP(epollInstance),
+		10*time.Second,
+		`{"status":"error","message":"driver update request timed out"}`,
+	))
 
 	if *models.MetricsAddr != "" {
 		metricsMux := http.NewServeMux()
@@ -179,12 +179,15 @@ func main() {
 	epollInstance.ShutdownWg.Wait()
 	log.Println("Epoll loop finished.")
 
+	log.Println("Waiting for workers to finish...")
+	epollInstance.WorkerWg.Wait()
+	log.Println("All workers finished.")
+
 	log.Println("Closing worker job channel...")
 	close(jobChan)
 
-	log.Println("Waiting for workers to finish...")
-	workerWg.Wait()
-	log.Println("All workers finished.")
+	log.Println("Closing SSE subscribers...")
+	epollInstance.UnregisterAllSSESubscribers()
 
 	log.Println("Closing any remaining active connections...")
 	closedCount := 0

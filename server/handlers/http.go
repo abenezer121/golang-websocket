@@ -89,6 +89,20 @@ func HandleDriverUpdateHTTP(ep *epoll.Epoll) http.HandlerFunc {
 			})
 			return
 		}
+		if *req.Lat < -90 || *req.Lat > 90 {
+			writeJSON(w, http.StatusBadRequest, apiResponse{
+				Status:  "error",
+				Message: "lat out of range",
+			})
+			return
+		}
+		if *req.Lng < -180 || *req.Lng > 180 {
+			writeJSON(w, http.StatusBadRequest, apiResponse{
+				Status:  "error",
+				Message: "lng out of range",
+			})
+			return
+		}
 
 		if err := ep.UpdateWorkersLocation(req.ID, *req.Lat, *req.Lng, req.CompanyID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiResponse{

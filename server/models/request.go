@@ -14,6 +14,7 @@ type Command struct {
 	Id          string          `json:"id,omitempty"`
 	CommandType *string         `json:"command_type,omitempty"`
 	DriverId    *string         `json:"driver_id,omitempty"`
+	DriverIDs   []string        `json:"driver_ids,omitempty"`
 	MinLat      *float64        `json:"min_lat,omitempty"`
 	MinLng      *float64        `json:"min_lng,omitempty"`
 	MaxLat      *float64        `json:"max_lat,omitempty"`

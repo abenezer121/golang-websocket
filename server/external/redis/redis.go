@@ -13,7 +13,34 @@ import (
 	"time"
 )
 
+func GetWorkerByID(rd *redis.Client, workerID string) (models.Command, bool, error) {
+	ctx := context.Background()
+
+	detailStr, err := rd.HGet(ctx, config.WorkerDetailsHash, workerID).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return models.Command{}, false, nil
+		}
+		return models.Command{}, false, fmt.Errorf("failed to fetch worker details for %s: %w", workerID, err)
+	}
+
+	var worker models.Command
+	if err := json.Unmarshal([]byte(detailStr), &worker); err != nil {
+		return models.Command{}, false, fmt.Errorf("failed to unmarshal worker details for %s: %w", workerID, err)
+	}
+
+	return worker, true, nil
+}
+
 func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64) ([]models.Command, error) {
+	return findWorkersInBBox(rd, minLat, minLng, maxLat, maxLng, "")
+}
+
+func FindWorkersInBBoxByCompany(rd *redis.Client, minLat, minLng, maxLat, maxLng float64, companyID string) ([]models.Command, error) {
+	return findWorkersInBBox(rd, minLat, minLng, maxLat, maxLng, companyID)
+}
+
+func findWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64, companyID string) ([]models.Command, error) {
 	ctx := context.Background()
 
 	if minLat >= maxLat || minLng >= maxLng {
@@ -78,20 +105,34 @@ func FindWorkersInBBox(rd *redis.Client, minLat, minLng, maxLat, maxLng float64)
 		}
 
 		var worker models.Command
-		if err := json.Unmarshal([]byte(detailStr), worker); err != nil {
+		if err := json.Unmarshal([]byte(detailStr), &worker); err != nil {
 			log.Printf("Error unmarshalling worker detail for %s: %v\n", workerIdsInBox[i], err)
 			continue
 		}
-		if *worker.Active {
 
-			workers = append(workers, worker)
+		if worker.Active == nil || !*worker.Active {
+			continue
 		}
+
+		if companyID != "" && worker.CompanyId != companyID {
+			continue
+		}
+
+		workers = append(workers, worker)
 	}
 
 	return workers, nil
 }
 
 func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Command, int, error) {
+	return getAllWorkersPaginated(rd, page, pageSize, "")
+}
+
+func GetAllWorkersPaginatedByCompany(rd *redis.Client, page, pageSize int, companyID string) ([]models.Command, int, error) {
+	return getAllWorkersPaginated(rd, page, pageSize, companyID)
+}
+
+func getAllWorkersPaginated(rd *redis.Client, page, pageSize int, companyID string) ([]models.Command, int, error) {
 	ctx := context.Background()
 
 	if page < 1 {
@@ -107,62 +148,49 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Comm
 		return nil, 0, fmt.Errorf("failed to get worker keys: %w", err)
 	}
 
-	totalWorkers := len(allWorkerIds)
-	if totalWorkers == 0 {
+	if len(allWorkerIds) == 0 {
 		return []models.Command{}, 0, nil
 	}
 
 	sort.Strings(allWorkerIds)
 
-	start := (page - 1) * pageSize
-	if start >= totalWorkers {
-		return []models.Command{}, totalWorkers, nil
-	}
-
-	end := start + pageSize
-	if end > totalWorkers {
-		end = totalWorkers
-	}
-
-	paginatedWorkerIds := allWorkerIds[start:end]
-
-	if len(paginatedWorkerIds) == 0 {
-		return []models.Command{}, totalWorkers, nil
-	}
-
-	detailsData, err := rd.HMGet(ctx, config.WorkerDetailsHash, paginatedWorkerIds...).Result()
+	detailsData, err := rd.HMGet(ctx, config.WorkerDetailsHash, allWorkerIds...).Result()
 	if err != nil {
 		log.Printf("Error fetching paginated worker details with HMGet: %v\n", err)
-		return nil, totalWorkers, fmt.Errorf("failed to fetch worker details for page %d: %w", page, err)
+		return nil, 0, fmt.Errorf("failed to fetch worker details for page %d: %w", page, err)
 	}
 
-	workers := make([]models.Command, 0, len(paginatedWorkerIds))
+	filteredWorkers := make([]models.Command, 0, len(allWorkerIds))
 	now := time.Now()
 	oneMinuteAgo := now.Add(-1 * time.Minute)
 	needsUpdate := make(map[string]models.Command)
 
 	for i, data := range detailsData {
 		if data == nil {
-			log.Printf("Details not found for paginated worker %s in %s\n", paginatedWorkerIds[i], config.WorkerDetailsHash)
+			log.Printf("Details not found for paginated worker %s in %s\n", allWorkerIds[i], config.WorkerDetailsHash)
 			continue
 		}
 
 		detailStr, ok := data.(string)
 		if !ok {
-			log.Printf("Unexpected data type for worker %s detail: %T\n", paginatedWorkerIds[i], data)
+			log.Printf("Unexpected data type for worker %s detail: %T\n", allWorkerIds[i], data)
 			continue
 		}
 
 		var worker models.Command
 		if err := json.Unmarshal([]byte(detailStr), &worker); err != nil {
-			log.Printf("Error unmarshalling worker detail for %s: %v\n", paginatedWorkerIds[i], err)
+			log.Printf("Error unmarshalling worker detail for %s: %v\n", allWorkerIds[i], err)
 			continue
 		}
 
 		// Parse the UpdatedAt string into a time.Time object
-		updatedAt, err := time.Parse(time.RFC3339, *worker.UpdatedAt) // Adjust layout based on your actual format
+		if worker.UpdatedAt == nil || worker.Active == nil {
+			continue
+		}
+
+		updatedAt, err := time.Parse(time.RFC3339, *worker.UpdatedAt)
 		if err != nil {
-			log.Printf("Error parsing UpdatedAt for worker %s: %v\n", paginatedWorkerIds[i], err)
+			log.Printf("Error parsing UpdatedAt for worker %s: %v\n", allWorkerIds[i], err)
 			continue
 		}
 
@@ -172,12 +200,42 @@ func GetAllWorkersPaginated(rd *redis.Client, page, pageSize int) ([]models.Comm
 		if updatedAt.Before(oneMinuteAgo) && *worker.Active {
 			worker.Active = &active
 			worker.UpdatedAt = &_updatedAt
-			needsUpdate[paginatedWorkerIds[i]] = worker
+			needsUpdate[allWorkerIds[i]] = worker
 		}
 
-		workers = append(workers, worker)
+		if companyID != "" && worker.CompanyId != companyID {
+			continue
+		}
+
+		filteredWorkers = append(filteredWorkers, worker)
 	}
 
+	totalWorkers := len(filteredWorkers)
+	if totalWorkers == 0 {
+		if len(needsUpdate) > 0 {
+			if err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate); err != nil {
+				log.Printf("Error updating inactive workers in Redis: %v\n", err)
+			}
+		}
+		return []models.Command{}, 0, nil
+	}
+
+	start := (page - 1) * pageSize
+	if start >= totalWorkers {
+		if len(needsUpdate) > 0 {
+			if err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate); err != nil {
+				log.Printf("Error updating inactive workers in Redis: %v\n", err)
+			}
+		}
+		return []models.Command{}, totalWorkers, nil
+	}
+
+	end := start + pageSize
+	if end > totalWorkers {
+		end = totalWorkers
+	}
+
+	workers := filteredWorkers[start:end]
 	if len(needsUpdate) > 0 {
 		err := updateInactiveWorkersInRedis(ctx, rd, needsUpdate)
 		if err != nil {

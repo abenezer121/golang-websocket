@@ -13,7 +13,6 @@ import (
 )
 
 func WsHander(upgrader websocket.Upgrader, w http.ResponseWriter, r *http.Request, ep *epoll.Epoll) {
-	// log.Printf("hello htere")
 	log.Printf("DRIVER handler hit: %s", r.URL.Path)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
