@@ -1,4 +1,4 @@
-// New code with the drivers simulation running in one container 
+// New code with the drivers simulation running in one container
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sync" 
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
 
 var (
@@ -26,7 +28,47 @@ var (
 	lng          = flag.Float64("lng", 38.234234, "starting lng")
 	numClients   = flag.Int("n", 1000, "number of clients to simulate") // New flag for scaling
 	mode         = flag.String("mode", "ws", "client mode: ws or grpc") // New flag to choose between WebSocket and gRPC the default is ws if u didn't specify the mode
+	poolSize     = flag.Int("pool", 50, "number of gRPC connections in the pool") // added
 )
+
+type connPool struct {
+	conns  []*grpc.ClientConn
+	cursor atomic.Uint64
+}
+
+func newConnPool(addr string, size int) (*connPool, error) {
+	pool := &connPool{conns: make([]*grpc.ClientConn, size)}
+
+	for i := range pool.conns {
+		conn, err := grpc.NewClient(
+			addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                30 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
+			grpc.WithInitialWindowSize(1<<20),
+			grpc.WithInitialConnWindowSize(1<<22),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("pool conn %d: %w", i, err)
+		}
+		pool.conns[i] = conn
+	}
+	return pool, nil
+}
+
+func (p *connPool) get() *grpc.ClientConn {
+	idx := p.cursor.Add(1) % uint64(len(p.conns))
+	return p.conns[idx]
+}
+
+func (p *connPool) close() {
+	for _, c := range p.conns {
+		c.Close()
+	}
+}
 
 func startDriver(driverID string, serverIP string, startLat, startLng float64, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -67,44 +109,53 @@ func startDriver(driverID string, serverIP string, startLat, startLng float64, w
 	}
 }
 
-func startGrpcDriver(driverID string, serverIP string, startLat, startLng float64, wg *sync.WaitGroup) {
+func startGrpcDriver(
+	ctx context.Context,
+	driverID string,
+	startLat, startLng float64,
+	pool *connPool,
+	wg *sync.WaitGroup,
+) {
 	defer wg.Done()
 
-	conn, err := grpc.Dial(serverIP+":8090", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	client := trackingpb.NewDriverTrackerClient(pool.get())
+
+	stream, err := client.PublishLocationStream(ctx)
 	if err != nil {
-		log.Printf("Driver %s failed to connect: %v", driverID, err)
+		log.Printf("Driver %s failed to open stream: %v", driverID, err)
 		return
 	}
-	defer conn.Close()
-
-	client := trackingpb.NewDriverTrackerClient(conn)
 
 	currentStep := 0
 	totalSteps := 100
 	endLat, endLng := 9.5124, 39.2288
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
 
 	for {
-		lat := startLat + (endLat-startLat)*float64(currentStep)/float64(totalSteps)
-		lng := startLng + (endLng-startLng)*float64(currentStep)/float64(totalSteps)
-
-		req := &trackingpb.DriverLocation{
-			Id:        driverID,
-			Lat:       lat,
-			Lng:       lng,
-			CompanyId: "beu",
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-		_, err := client.PublishLocation(ctx, req)
-		cancel()
-
-		if err != nil {
-			log.Printf("Driver %s lost connection: %v", driverID, err)
+		select {
+		case <-ctx.Done():
+			_, _ = stream.CloseAndRecv()
 			return
-		}
 
-		currentStep = (currentStep + 1) % totalSteps
-		time.Sleep(time.Second * 2)
+		case <-ticker.C:
+			lat := startLat + (endLat-startLat)*float64(currentStep)/float64(totalSteps)
+			lng := startLng + (endLng-startLng)*float64(currentStep)/float64(totalSteps)
+
+			err := stream.Send(&trackingpb.DriverLocation{
+				Id:        driverID,
+				Lat:       lat,
+				Lng:       lng,
+				CompanyId: "beu",
+			})
+
+			if err != nil {
+				log.Printf("Driver %s send error: %v", driverID, err)
+				return
+			}
+
+			currentStep = (currentStep + 1) % totalSteps
+		}
 	}
 }
 
@@ -124,12 +175,28 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	
+	// create pool ONLY if grpc mode
+	var pool *connPool
+	var ctx context.Context
+	var cancel context.CancelFunc
+
+	if *mode == "grpc" {
+		var err error
+		pool, err = newConnPool(fmt.Sprintf("%s:8090", *ip), *poolSize)
+		if err != nil {
+			log.Fatalf("Failed to create pool: %v", err)
+		}
+		defer pool.close()
+
+		ctx, cancel = context.WithCancel(context.Background())
+		defer cancel()
+	}
+
 	for i := 1; i <= *numClients; i++ {
 		wg.Add(1)
 		driverID := fmt.Sprintf("driver_%d", i)
 		if *mode == "grpc" {
-			go startGrpcDriver(driverID, *ip, *lat, *lng, &wg)
+			go startGrpcDriver(ctx, driverID, *lat, *lng, pool, &wg)
 		} else {
 			go startDriver(driverID, *ip, *lat, *lng, &wg)
 		}

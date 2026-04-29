@@ -12,7 +12,6 @@ WORKDIR /src/client
 RUN go mod download
 
 COPY client/ ./
-COPY server/grpc/trackingpb ../server/grpc/trackingpb
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/client ./main.go
 
@@ -23,4 +22,4 @@ COPY --from=builder /out/client /app/client
 
 CMD ["/app/client"]
 
-# sudo docker build -t ws-client .
+# sudo docker build -f Dockerfile -t ws-client ..
