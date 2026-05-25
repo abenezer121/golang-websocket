@@ -32,12 +32,17 @@ func (s *Server) PublishLocation(ctx context.Context, req *trackingpb.DriverLoca
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
 
+	if req.Lat == nil || req.Lng == nil {
+		s.metrics.ProcessingErrors.Add(1)
+		return nil, status.Error(codes.InvalidArgument, "latitude and longitude are required")
+	}
+
 	s.metrics.MessagesReceived.Add(1)
 
 	cmd := models.Command{
 		Id:        req.GetId(),
-		Lat:       float64Ptr(req.GetLat()),
-		Lng:       float64Ptr(req.GetLng()),
+		Lat:       req.Lat,
+		Lng:       req.Lng,
 		CompanyId: req.GetCompanyId(),
 	}
 	if err := s.tracker.ProcessDriverUpdate(cmd); err != nil {
@@ -75,10 +80,15 @@ func (s *Server) PublishLocationStream(stream trackingpb.DriverTracker_PublishLo
 			return status.Error(codes.InvalidArgument, "id is required")
 		}
 
+		if req.Lat == nil || req.Lng == nil {
+			s.metrics.ProcessingErrors.Add(1)
+			return status.Error(codes.InvalidArgument, "latitude and longitude are required")
+		}
+
 		cmd := models.Command{
 			Id:        req.GetId(),
-			Lat:       float64Ptr(req.GetLat()),
-			Lng:       float64Ptr(req.GetLng()),
+			Lat:       req.Lat,
+			Lng:       req.Lng,
 			CompanyId: req.GetCompanyId(),
 		}
 		if err := s.tracker.ProcessDriverUpdate(cmd); err != nil {
@@ -113,6 +123,9 @@ func (s *Server) TrackDriver(req *trackingpb.TrackDriverRequest, stream tracking
 
 func (s *Server) GetDrivers(ctx context.Context, req *trackingpb.GetDriversRequest) (*trackingpb.DriversResponse, error) {
 	page := int(req.GetPage())
+	if page < 0 {
+		return nil, status.Error(codes.InvalidArgument, "page must be greater than or equal to 0")
+	}
 	if page == 0 {
 		page = 1
 	}

@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.1
 // - protoc             v3.19.6
-// source: grpc/tracking.proto
+// source: tracking/v1/tracking.proto
 
 package trackingpb
 
@@ -266,5 +266,5 @@ var DriverTracker_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "grpc/tracking.proto",
+	Metadata: "tracking/v1/tracking.proto",
 }

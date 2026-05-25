@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sys/unix"
 	grpc "google.golang.org/grpc"
@@ -172,8 +173,12 @@ func main() {
 		log.Fatalf("FATAL: Failed to listen for gRPC on %s: %v", *models.GRPCAddr, err)
 	}
 	grpcSrv := grpc.NewServer()
-	grpcapi.Register(grpcSrv, trackerSvc, serverGrpcMetrics)
-	reflection.Register(grpcSrv)
+	
+	godotenv.Load()
+	grpcapi.Register(grpcSrv, trackerSvc, serverGrpcMetrics) 
+	if os.Getenv("ENABLE_GRPC_REFLECTION") == "true" { 
+		reflection.Register(grpcSrv) 
+	}
 
 	go func() {
 		log.Printf("Starting gRPC server on %s", *models.GRPCAddr)

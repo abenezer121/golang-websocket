@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"errors"
 	"fastsocket/grpc/trackingpb"
 	"fastsocket/models"
 	"fmt"
@@ -110,8 +109,23 @@ func derefBool(value *bool) bool {
 }
 
 func ValidateBBox(minLat, minLng, maxLat, maxLng float64) error {
-	if minLat >= maxLat || minLng >= maxLng {
-		return errors.New("invalid bounding box coordinates")
+	if minLat < -90 || minLat > 90 {
+		return fmt.Errorf("min_lat %f is out of bounds [-90, 90]", minLat)
+	}
+	if maxLat < -90 || maxLat > 90 {
+		return fmt.Errorf("max_lat %f is out of bounds [-90, 90]", maxLat)
+	}
+	if minLng < -180 || minLng > 180 {
+		return fmt.Errorf("min_lng %f is out of bounds [-180, 180]", minLng)
+	}
+	if maxLng < -180 || maxLng > 180 {
+		return fmt.Errorf("max_lng %f is out of bounds [-180, 180]", maxLng)
+	}
+	if minLat >= maxLat {
+		return fmt.Errorf("min_lat %f must be less than max_lat %f", minLat, maxLat)
+	}
+	if minLng >= maxLng {
+		return fmt.Errorf("min_lng %f must be less than max_lng %f", minLng, maxLng)
 	}
 	return nil
 }

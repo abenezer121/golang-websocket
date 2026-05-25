@@ -13,13 +13,16 @@ RUN go mod download
 
 COPY client/ ./
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/client ./main.go
+RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux go build -o /out/client ./main.go
 
 FROM debian:bookworm-slim
 
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
 WORKDIR /app
-COPY --from=builder /out/client /app/client
+RUN chown -R appuser:appgroup /app
+COPY --from=builder --chown=appuser:appgroup /out/client /app/client
 
+USER appuser
 CMD ["/app/client"]
 
 # sudo docker build -f Dockerfile -t ws-client ..

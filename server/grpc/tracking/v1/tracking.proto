@@ -14,8 +14,8 @@ service DriverTracker {
 
 message DriverLocation {
   string id = 1;
-  double lat = 2;
-  double lng = 3;
+  optional double lat = 2;
+  optional double lng = 3;
   string company_id = 4;
 }
 

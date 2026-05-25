@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v3.19.6
-// source: grpc/tracking.proto
+// source: tracking/v1/tracking.proto
 
 package trackingpb
 
@@ -24,8 +24,8 @@ const (
 type DriverLocation struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Lat           float64                `protobuf:"fixed64,2,opt,name=lat,proto3" json:"lat,omitempty"`
-	Lng           float64                `protobuf:"fixed64,3,opt,name=lng,proto3" json:"lng,omitempty"`
+	Lat           *float64               `protobuf:"fixed64,2,opt,name=lat,proto3,oneof" json:"lat,omitempty"`
+	Lng           *float64               `protobuf:"fixed64,3,opt,name=lng,proto3,oneof" json:"lng,omitempty"`
 	CompanyId     string                 `protobuf:"bytes,4,opt,name=company_id,json=companyId,proto3" json:"company_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -33,7 +33,7 @@ type DriverLocation struct {
 
 func (x *DriverLocation) Reset() {
 	*x = DriverLocation{}
-	mi := &file_grpc_tracking_proto_msgTypes[0]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -45,7 +45,7 @@ func (x *DriverLocation) String() string {
 func (*DriverLocation) ProtoMessage() {}
 
 func (x *DriverLocation) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[0]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -58,7 +58,7 @@ func (x *DriverLocation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DriverLocation.ProtoReflect.Descriptor instead.
 func (*DriverLocation) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{0}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *DriverLocation) GetId() string {
@@ -69,15 +69,15 @@ func (x *DriverLocation) GetId() string {
 }
 
 func (x *DriverLocation) GetLat() float64 {
-	if x != nil {
-		return x.Lat
+	if x != nil && x.Lat != nil {
+		return *x.Lat
 	}
 	return 0
 }
 
 func (x *DriverLocation) GetLng() float64 {
-	if x != nil {
-		return x.Lng
+	if x != nil && x.Lng != nil {
+		return *x.Lng
 	}
 	return 0
 }
@@ -98,7 +98,7 @@ type PublishAck struct {
 
 func (x *PublishAck) Reset() {
 	*x = PublishAck{}
-	mi := &file_grpc_tracking_proto_msgTypes[1]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -110,7 +110,7 @@ func (x *PublishAck) String() string {
 func (*PublishAck) ProtoMessage() {}
 
 func (x *PublishAck) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[1]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -123,7 +123,7 @@ func (x *PublishAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishAck.ProtoReflect.Descriptor instead.
 func (*PublishAck) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{1}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *PublishAck) GetStatus() string {
@@ -142,7 +142,7 @@ type TrackDriverRequest struct {
 
 func (x *TrackDriverRequest) Reset() {
 	*x = TrackDriverRequest{}
-	mi := &file_grpc_tracking_proto_msgTypes[2]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -154,7 +154,7 @@ func (x *TrackDriverRequest) String() string {
 func (*TrackDriverRequest) ProtoMessage() {}
 
 func (x *TrackDriverRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[2]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -167,7 +167,7 @@ func (x *TrackDriverRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrackDriverRequest.ProtoReflect.Descriptor instead.
 func (*TrackDriverRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{2}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *TrackDriverRequest) GetDriverId() string {
@@ -186,7 +186,7 @@ type GetDriversRequest struct {
 
 func (x *GetDriversRequest) Reset() {
 	*x = GetDriversRequest{}
-	mi := &file_grpc_tracking_proto_msgTypes[3]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -198,7 +198,7 @@ func (x *GetDriversRequest) String() string {
 func (*GetDriversRequest) ProtoMessage() {}
 
 func (x *GetDriversRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[3]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -211,7 +211,7 @@ func (x *GetDriversRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDriversRequest.ProtoReflect.Descriptor instead.
 func (*GetDriversRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{3}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetDriversRequest) GetPage() int32 {
@@ -233,7 +233,7 @@ type GetBBoxRequest struct {
 
 func (x *GetBBoxRequest) Reset() {
 	*x = GetBBoxRequest{}
-	mi := &file_grpc_tracking_proto_msgTypes[4]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -245,7 +245,7 @@ func (x *GetBBoxRequest) String() string {
 func (*GetBBoxRequest) ProtoMessage() {}
 
 func (x *GetBBoxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[4]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -258,7 +258,7 @@ func (x *GetBBoxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBBoxRequest.ProtoReflect.Descriptor instead.
 func (*GetBBoxRequest) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{4}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetBBoxRequest) GetMinLat() float64 {
@@ -308,7 +308,7 @@ type Driver struct {
 
 func (x *Driver) Reset() {
 	*x = Driver{}
-	mi := &file_grpc_tracking_proto_msgTypes[5]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -320,7 +320,7 @@ func (x *Driver) String() string {
 func (*Driver) ProtoMessage() {}
 
 func (x *Driver) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[5]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -333,7 +333,7 @@ func (x *Driver) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Driver.ProtoReflect.Descriptor instead.
 func (*Driver) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{5}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Driver) GetId() string {
@@ -427,7 +427,7 @@ type DriverLocationUpdate struct {
 
 func (x *DriverLocationUpdate) Reset() {
 	*x = DriverLocationUpdate{}
-	mi := &file_grpc_tracking_proto_msgTypes[6]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -439,7 +439,7 @@ func (x *DriverLocationUpdate) String() string {
 func (*DriverLocationUpdate) ProtoMessage() {}
 
 func (x *DriverLocationUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[6]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -452,7 +452,7 @@ func (x *DriverLocationUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DriverLocationUpdate.ProtoReflect.Descriptor instead.
 func (*DriverLocationUpdate) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{6}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *DriverLocationUpdate) GetWorkerId() string {
@@ -508,7 +508,7 @@ type DriversResponse struct {
 
 func (x *DriversResponse) Reset() {
 	*x = DriversResponse{}
-	mi := &file_grpc_tracking_proto_msgTypes[7]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -520,7 +520,7 @@ func (x *DriversResponse) String() string {
 func (*DriversResponse) ProtoMessage() {}
 
 func (x *DriversResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[7]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -533,7 +533,7 @@ func (x *DriversResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DriversResponse.ProtoReflect.Descriptor instead.
 func (*DriversResponse) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{7}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DriversResponse) GetCommand() string {
@@ -570,7 +570,7 @@ type WatcherEvent struct {
 
 func (x *WatcherEvent) Reset() {
 	*x = WatcherEvent{}
-	mi := &file_grpc_tracking_proto_msgTypes[8]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -582,7 +582,7 @@ func (x *WatcherEvent) String() string {
 func (*WatcherEvent) ProtoMessage() {}
 
 func (x *WatcherEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_grpc_tracking_proto_msgTypes[8]
+	mi := &file_tracking_v1_tracking_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -595,7 +595,7 @@ func (x *WatcherEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatcherEvent.ProtoReflect.Descriptor instead.
 func (*WatcherEvent) Descriptor() ([]byte, []int) {
-	return file_grpc_tracking_proto_rawDescGZIP(), []int{8}
+	return file_tracking_v1_tracking_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WatcherEvent) GetCommand() string {
@@ -633,17 +633,19 @@ func (x *WatcherEvent) GetStatus() string {
 	return ""
 }
 
-var File_grpc_tracking_proto protoreflect.FileDescriptor
+var File_tracking_v1_tracking_proto protoreflect.FileDescriptor
 
-const file_grpc_tracking_proto_rawDesc = "" +
+const file_tracking_v1_tracking_proto_rawDesc = "" +
 	"\n" +
-	"\x13grpc/tracking.proto\x12\vtracking.v1\"c\n" +
+	"\x1atracking/v1/tracking.proto\x12\vtracking.v1\"}\n" +
 	"\x0eDriverLocation\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
-	"\x03lat\x18\x02 \x01(\x01R\x03lat\x12\x10\n" +
-	"\x03lng\x18\x03 \x01(\x01R\x03lng\x12\x1d\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n" +
+	"\x03lat\x18\x02 \x01(\x01H\x00R\x03lat\x88\x01\x01\x12\x15\n" +
+	"\x03lng\x18\x03 \x01(\x01H\x01R\x03lng\x88\x01\x01\x12\x1d\n" +
 	"\n" +
-	"company_id\x18\x04 \x01(\tR\tcompanyId\"$\n" +
+	"company_id\x18\x04 \x01(\tR\tcompanyIdB\x06\n" +
+	"\x04_latB\x06\n" +
+	"\x04_lng\"$\n" +
 	"\n" +
 	"PublishAck\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
@@ -701,19 +703,19 @@ const file_grpc_tracking_proto_rawDesc = "" +
 	"\aGetBBox\x12\x1b.tracking.v1.GetBBoxRequest\x1a\x1c.tracking.v1.DriversResponseB'Z%fastsocket/grpc/trackingpb;trackingpbb\x06proto3"
 
 var (
-	file_grpc_tracking_proto_rawDescOnce sync.Once
-	file_grpc_tracking_proto_rawDescData []byte
+	file_tracking_v1_tracking_proto_rawDescOnce sync.Once
+	file_tracking_v1_tracking_proto_rawDescData []byte
 )
 
-func file_grpc_tracking_proto_rawDescGZIP() []byte {
-	file_grpc_tracking_proto_rawDescOnce.Do(func() {
-		file_grpc_tracking_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_grpc_tracking_proto_rawDesc), len(file_grpc_tracking_proto_rawDesc)))
+func file_tracking_v1_tracking_proto_rawDescGZIP() []byte {
+	file_tracking_v1_tracking_proto_rawDescOnce.Do(func() {
+		file_tracking_v1_tracking_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_tracking_v1_tracking_proto_rawDesc), len(file_tracking_v1_tracking_proto_rawDesc)))
 	})
-	return file_grpc_tracking_proto_rawDescData
+	return file_tracking_v1_tracking_proto_rawDescData
 }
 
-var file_grpc_tracking_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
-var file_grpc_tracking_proto_goTypes = []any{
+var file_tracking_v1_tracking_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_tracking_v1_tracking_proto_goTypes = []any{
 	(*DriverLocation)(nil),       // 0: tracking.v1.DriverLocation
 	(*PublishAck)(nil),           // 1: tracking.v1.PublishAck
 	(*TrackDriverRequest)(nil),   // 2: tracking.v1.TrackDriverRequest
@@ -724,7 +726,7 @@ var file_grpc_tracking_proto_goTypes = []any{
 	(*DriversResponse)(nil),      // 7: tracking.v1.DriversResponse
 	(*WatcherEvent)(nil),         // 8: tracking.v1.WatcherEvent
 }
-var file_grpc_tracking_proto_depIdxs = []int32{
+var file_tracking_v1_tracking_proto_depIdxs = []int32{
 	5, // 0: tracking.v1.DriversResponse.drivers:type_name -> tracking.v1.Driver
 	5, // 1: tracking.v1.WatcherEvent.drivers:type_name -> tracking.v1.Driver
 	6, // 2: tracking.v1.WatcherEvent.driver_data:type_name -> tracking.v1.DriverLocationUpdate
@@ -745,26 +747,27 @@ var file_grpc_tracking_proto_depIdxs = []int32{
 	0, // [0:3] is the sub-list for field type_name
 }
 
-func init() { file_grpc_tracking_proto_init() }
-func file_grpc_tracking_proto_init() {
-	if File_grpc_tracking_proto != nil {
+func init() { file_tracking_v1_tracking_proto_init() }
+func file_tracking_v1_tracking_proto_init() {
+	if File_tracking_v1_tracking_proto != nil {
 		return
 	}
+	file_tracking_v1_tracking_proto_msgTypes[0].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grpc_tracking_proto_rawDesc), len(file_grpc_tracking_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tracking_v1_tracking_proto_rawDesc), len(file_tracking_v1_tracking_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_grpc_tracking_proto_goTypes,
-		DependencyIndexes: file_grpc_tracking_proto_depIdxs,
-		MessageInfos:      file_grpc_tracking_proto_msgTypes,
+		GoTypes:           file_tracking_v1_tracking_proto_goTypes,
+		DependencyIndexes: file_tracking_v1_tracking_proto_depIdxs,
+		MessageInfos:      file_tracking_v1_tracking_proto_msgTypes,
 	}.Build()
-	File_grpc_tracking_proto = out.File
-	file_grpc_tracking_proto_goTypes = nil
-	file_grpc_tracking_proto_depIdxs = nil
+	File_tracking_v1_tracking_proto = out.File
+	file_tracking_v1_tracking_proto_goTypes = nil
+	file_tracking_v1_tracking_proto_depIdxs = nil
 }

@@ -37,6 +37,10 @@ type connPool struct {
 }
 
 func newConnPool(addr string, size int) (*connPool, error) {
+	
+	if size <= 0 {
+		return nil, fmt.Errorf("pool size must be > 0")
+	}
 	pool := &connPool{conns: make([]*grpc.ClientConn, size)}
 
 	for i := range pool.conns {
@@ -52,6 +56,11 @@ func newConnPool(addr string, size int) (*connPool, error) {
 			grpc.WithInitialConnWindowSize(1<<22),
 		)
 		if err != nil {
+			for _, c := range pool.conns[:i] {
+				if c != nil {
+					_ = c.Close()
+				}
+			}
 			return nil, fmt.Errorf("pool conn %d: %w", i, err)
 		}
 		pool.conns[i] = conn
@@ -144,8 +153,8 @@ func startGrpcDriver(
 
 			err := stream.Send(&trackingpb.DriverLocation{
 				Id:        driverID,
-				Lat:       lat,
-				Lng:       lng,
+				Lat:       &lat,
+				Lng:       &lng,
 				CompanyId: "beu",
 			})
 
@@ -165,6 +174,10 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	if *mode != "ws" && *mode != "websocket" && *mode != "grpc" {
+		log.Fatalf("Unsupported mode: %q. Allowed modes are: 'ws', 'websocket', 'grpc'", *mode)
+	}
 
 	var rlimit syscall.Rlimit
 	syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit)

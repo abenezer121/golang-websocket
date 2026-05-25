@@ -51,36 +51,6 @@ func (s *Service) UpdateWorkerLocation(workerID string, lat, lng float64, compan
 	nowStr := now.Format(time.RFC3339)
 	nowUnixStr := strconv.FormatInt(now.Unix(), 10)
 
-	subscribers := s.subscribersFor(workerID)
-	if len(subscribers) > 0 {
-		update := models.LocationUpdate{
-			WorkerID:  workerID,
-			Latitude:  lat,
-			Longitude: lng,
-			Timestamp: nowStr,
-			UnixTime:  nowUnixStr,
-			CompanyId: companyID,
-		}
-
-		response := models.WatcherResponse{
-			Command:      "track",
-			DriverUpdate: &update,
-		}
-
-		brokenIDs := make([]string, 0)
-		for _, conn := range subscribers {
-			if err := conn.Send(response); err != nil {
-				log.Printf("Failed to write to connection for worker %s: %v", workerID, err)
-				_ = conn.Close()
-				brokenIDs = append(brokenIDs, conn.ID())
-			}
-		}
-
-		if len(brokenIDs) > 0 {
-			s.removeSubscribers(workerID, brokenIDs)
-		}
-	}
-
 	pipe := s.redis.Pipeline()
 	pipe.GeoAdd(ctx, config.WorkerLocationSet, &redis.GeoLocation{
 		Name:      workerID,
@@ -105,6 +75,7 @@ func (s *Service) UpdateWorkerLocation(workerID string, lat, lng float64, compan
 			CreatedAt: &nowStr,
 			UpdatedAt: &nowStr,
 			Active:    &active,
+			LastSeen:  &now,
 		}
 	} else {
 		var existingWorker models.Command
@@ -119,15 +90,19 @@ func (s *Service) UpdateWorkerLocation(workerID string, lat, lng float64, compan
 				CreatedAt: &nowStr,
 				UpdatedAt: &nowStr,
 				Active:    &active,
+				LastSeen:  &now,
 			}
 		} else {
 			active := true
 			workerToStore = existingWorker
 			workerToStore.Lat = &lat
 			workerToStore.Lng = &lng
-			workerToStore.CompanyId = companyID
+			if companyID != "" {
+				workerToStore.CompanyId = companyID
+			}
 			workerToStore.UpdatedAt = &nowStr
 			workerToStore.Active = &active
+			workerToStore.LastSeen = &now
 		}
 	}
 
@@ -144,6 +119,36 @@ func (s *Service) UpdateWorkerLocation(workerID string, lat, lng float64, compan
 		return fmt.Errorf("redis pipeline execution failed: %w", err)
 	}
 
+	subscribers := s.subscribersFor(workerID)
+	if len(subscribers) > 0 {
+		update := models.LocationUpdate{
+			WorkerID:  workerID,
+			Latitude:  lat,
+			Longitude: lng,
+			Timestamp: nowStr,
+			UnixTime:  nowUnixStr,
+			CompanyId: workerToStore.CompanyId,
+		}
+
+		response := models.WatcherResponse{
+			Command:      "track",
+			DriverUpdate: &update,
+		}
+
+		brokenIDs := make([]string, 0)
+		for _, conn := range subscribers {
+			if err := conn.Send(response); err != nil {
+				log.Printf("Failed to write to connection for worker %s: %v", workerID, err)
+				_ = conn.Close()
+				brokenIDs = append(brokenIDs, conn.ID())
+			}
+		}
+
+		if len(brokenIDs) > 0 {
+			s.removeSubscribers(workerID, brokenIDs)
+		}
+	}
+
 	return nil
 }
 
@@ -156,6 +161,10 @@ func (s *Service) HandleWatcherCommand(decodedMsg models.Command, conn transport
 	case "get-bbox":
 		if decodedMsg.MinLat == nil || decodedMsg.MinLng == nil || decodedMsg.MaxLat == nil || decodedMsg.MaxLng == nil {
 			return s.sendError(conn, "get-bbox command requires min_lat, min_lng, max_lat, max_lng")
+		}
+
+		if err := transport.ValidateBBox(*decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng); err != nil {
+			return s.sendError(conn, err.Error())
 		}
 
 		response, err := s.bboxResponse(*decodedMsg.MinLat, *decodedMsg.MinLng, *decodedMsg.MaxLat, *decodedMsg.MaxLng)
@@ -314,6 +323,7 @@ func (s *Service) removeSubscribers(driverID string, connIDs []string) {
 
 func (s *Service) send(conn transport.ClientConnection, payload models.WatcherResponse) error {
 	if err := conn.Send(payload); err != nil {
+		s.RemoveConnection(conn.ID())
 		_ = conn.Close()
 		return err
 	}
