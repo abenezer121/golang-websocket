@@ -9,7 +9,9 @@ import (
 
 var (
 	Addr             = flag.String("addr", ":8082", "WebSocket service address (e.g., :8080)")
+	GRPCAddr         = flag.String("grpcAddr", ":8090", "gRPC service address (e.g., :8090)")
 	MetricsAddr      = flag.String("metaddr", ":8089", "WebSocket service address (e.g., :8080)")
+	GRPCMetricsAddr  = flag.String("grpcMetAddr", ":8091", "gRPC Metrics service address (e.g., :8091)")
 	Workers          = flag.Int("workers", runtime.NumCPU()*2, "Number of worker goroutines")
 	ReadBufSize      = flag.Int("readBuf", 4096, "Read buffer size per connection")
 	WriteBufSize     = flag.Int("writeBuf", 4096, "Write buffer size per connection")
@@ -44,5 +46,14 @@ type Metrics struct {
 	ReadErrors                atomic.Int64
 	WriteErrors               atomic.Int64
 	ProcessingErrors          atomic.Int64
+}
+
+type GRPCMetrics struct {
+	StartTime          time.Time
+	CurrentConnections atomic.Int64
+	TotalConnections   atomic.Int64
+	MessagesReceived   atomic.Int64
+	MessagesSent       atomic.Int64
+	ProcessingErrors   atomic.Int64
 }
 

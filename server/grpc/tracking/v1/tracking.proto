@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package tracking.v1;
+
+option go_package = "fastsocket/grpc/trackingpb;trackingpb";
+
+service DriverTracker {
+  rpc PublishLocation(DriverLocation) returns (PublishAck);
+  rpc PublishLocationStream(stream DriverLocation) returns (PublishAck);
+  rpc TrackDriver(TrackDriverRequest) returns (stream WatcherEvent);
+  rpc GetDrivers(GetDriversRequest) returns (DriversResponse);
+  rpc GetBBox(GetBBoxRequest) returns (DriversResponse);
+}
+
+message DriverLocation {
+  string id = 1;
+  optional double lat = 2;
+  optional double lng = 3;
+  string company_id = 4;
+}
+
+message PublishAck {
+  string status = 1;
+}
+
+message TrackDriverRequest {
+  string driver_id = 1;
+}
+
+message GetDriversRequest {
+  int32 page = 1;
+}
+
+message GetBBoxRequest {
+  double min_lat = 1;
+  double min_lng = 2;
+  double max_lat = 3;
+  double max_lng = 4;
+}
+
+message Driver {
+  string id = 1;
+  double lat = 2;
+  double lng = 3;
+  string from = 4;
+  string session = 5;
+  string created_at = 6;
+  string updated_at = 7;
+  string last_seen = 8;
+  bool active = 9;
+  string company_id = 10;
+  int32 driver_type = 11;
+}
+
+message DriverLocationUpdate {
+  string worker_id = 1;
+  double lat = 2;
+  double lng = 3;
+  string timestamp = 4;
+  string company_id = 5;
+  string unix_time = 6;
+}
+
+message DriversResponse {
+  string command = 1;
+  repeated Driver drivers = 2;
+  int32 total = 3;
+}
+
+message WatcherEvent {
+  string command = 1;
+  repeated Driver drivers = 2;
+  DriverLocationUpdate driver_data = 3;
+  string error = 4;
+  string status = 5;
+}
