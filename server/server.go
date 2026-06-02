@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fastsocket/epoll"
 	grpcapi "fastsocket/grpc"
@@ -10,6 +11,7 @@ import (
 	"fastsocket/tracker"
 	"fastsocket/util"
 	"flag"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -27,6 +29,9 @@ import (
 	grpc "google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
+
+//go:embed web/*
+var webAssets embed.FS
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -94,6 +99,23 @@ func main() {
 		handlers.ControlHandler(upgrader, w, r, epollInstance)
 	})
 
+	// Serve static frontend files
+	subFS, err := fs.Sub(webAssets, "web")
+	if err != nil {
+		log.Fatalf("FATAL: Failed to create sub-FS for web assets: %v", err)
+	}
+	mux.Handle("/", http.FileServer(http.FS(subFS)))
+
+	// SSE subscription stream endpoint
+	mux.HandleFunc("/sse", handlers.SSEHandler(trackerSvc))
+
+	// HTTP POST driver location updates endpoint
+	mux.Handle("/driver/update", http.TimeoutHandler(
+		handlers.HandleDriverUpdateHTTP(trackerSvc),
+		10*time.Second,
+		`{"status":"error","message":"driver update request timed out"}`,
+	))
+
 	if *models.MetricsAddr != "" {
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", handlers.MetricsHandler(serverMetrics))
@@ -156,7 +178,7 @@ func main() {
 		Handler: mux,
 
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 0 * time.Second, // SSE requires unlimited write timeout
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -192,6 +214,10 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 	log.Printf("Received shutdown signal: %s. Starting graceful shutdown...", sig)
+
+	// Close all SSE subscriptions cleanly
+	log.Println("Unregistering all active SSE subscriptions...")
+	trackerSvc.UnregisterAllSSESubscriptions()
 
 	// Stop accepting new HTTP connections
 	shutdownCtxHTTP, cancelHTTP := context.WithTimeout(context.Background(), 15*time.Second)

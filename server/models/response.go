@@ -17,4 +17,6 @@ type WatcherResponse struct {
 	DriverUpdate *LocationUpdate
 	Error        string
 	Status       string
+	Message      string
+	DriverIDs    []string
 }
